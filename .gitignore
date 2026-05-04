@@ -1,0 +1,7 @@
+.bench-state.json
+results/
+*.log
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-bench results viewer</title>
+<style>
+  :root {
+    --fg: #1a1d21; --muted: #6b7280; --border: #e5e7eb; --hl: #f9fafb;
+    --acc: #2563eb; --acc-soft: #dbeafe;
+    --good: #16a34a; --good-soft: #dcfce7;
+    --bad:  #dc2626; --bad-soft:  #fee2e2;
+    --warn: #d97706; --warn-soft: #fef3c7;
+    --bg: #fafbfc;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    max-width: 1200px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem;
+    color: var(--fg); line-height: 1.5;
+  }
+  h1 {
+    margin: 0 0 0.25rem; font-size: 1.9rem; letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #111827 0%, #4b5563 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  h2 {
+    margin-top: 2.5rem; margin-bottom: 0.75rem;
+    font-size: 1.15rem; letter-spacing: -0.01em; color: #111827;
+    text-transform: uppercase; font-weight: 600;
+  }
+  h3 { margin: 1rem 0 0.4rem; font-size: 1rem; color: #111827; font-weight: 600; }
+  code { background: var(--hl); padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
+
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.75rem; }
+  .meta strong { color: var(--fg); }
+
+  .dropzone {
+    border: 2px dashed #cbd5e1; border-radius: 12px; padding: 2.25rem;
+    text-align: center; color: var(--muted); cursor: pointer;
+    background: #fff;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+  }
+  .dropzone:hover { border-color: var(--acc); color: var(--acc); }
+  .dropzone:active { transform: scale(0.998); }
+  .dropzone.hover { background: var(--acc-soft); border-color: var(--acc); color: var(--acc); }
+  .dropzone input { display: none; }
+  .dropzone strong { color: var(--fg); }
+
+  /* Tables — card-like, subtle borders, no full grid */
+  .tbl-wrap {
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    margin: 0.5rem 0 1rem;
+  }
+  table { border-collapse: collapse; width: 100%;
+    font-variant-numeric: tabular-nums; font-size: 0.92rem; }
+  th, td { padding: 9px 14px; text-align: left; vertical-align: middle;
+    border-bottom: 1px solid var(--border); }
+  thead th {
+    background: var(--hl); font-weight: 600; color: #374151;
+    font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase;
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: #f8fafc; }
+  th[title] { cursor: help; }
+  th[title]::after {
+    content: " ⓘ"; color: #9ca3af; font-size: 0.78rem;
+  }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.label { font-weight: 600; color: var(--fg); white-space: nowrap; }
+
+  /* Winner / loser highlighting */
+  td.winner {
+    background: var(--good-soft) !important; color: #14532d; font-weight: 600;
+    position: relative;
+  }
+  td.winner::before {
+    content: "★"; color: var(--good); margin-right: 4px; font-size: 0.85em;
+  }
+  td.loser  { color: #6b7280; }
+
+  /* Mini bar charts */
+  .bar-wrap { display: flex; align-items: center; gap: 8px; min-width: 80px; }
+  .bar { flex: 1; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--acc); border-radius: 3px; }
+  .bar-fill.good { background: var(--good); }
+  .bar-fill.warn { background: var(--warn); }
+  .bar-num { font-variant-numeric: tabular-nums; font-size: 0.88em; min-width: 50px; text-align: right; }
+
+  pre { background: var(--hl); padding: 1rem 1.1rem; border-radius: 8px;
+    white-space: pre-wrap; word-wrap: break-word; font-size: 0.85rem;
+    border: 1px solid var(--border);
+  }
+  .combo { margin-top: 1.2rem; }
+  .legend { font-size: 0.85rem; color: var(--muted); margin-top: 0.6rem;
+    background: var(--hl); padding: 0.6rem 0.9rem; border-radius: 6px;
+    border-left: 3px solid var(--acc);
+  }
+
+  /* Badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .badge-yes { background: var(--good-soft); color: var(--good); }
+  .badge-no  { background: var(--bad-soft);  color: var(--bad); }
+  .badge-na  { background: var(--hl); color: var(--muted); }
+
+  .hidden { display: none; }
+  .err {
+    color: var(--bad); background: var(--bad-soft); padding: 0.6rem 0.9rem;
+    border-radius: 6px; margin: 0.75rem 0; font-size: 0.9rem;
+  }
+  .err:empty { display: none; }
+</style>
+</head>
+<body>
+
+<h1>agent-bench results viewer</h1>
+<div class="meta">Drop a <code>results.json</code> here, or click to choose one. Hover any column header for an explanation.</div>
+
+<div class="dropzone" id="dz" role="button" tabindex="0">
+  <input type="file" id="filein" accept="application/json,.json">
+  <div><strong>Choose results.json</strong> or drop it here</div>
+  <div style="margin-top:0.4rem; font-size:0.85rem;">
+    Typical path: <code>results/&lt;timestamp&gt;/results.json</code>
+  </div>
+</div>
+
+<div id="err" class="err"></div>
+<main id="report" class="hidden"></main>
+
+<script>
+const FIELD_DOCS = {
+  agent:   "The CLI/agent under test (e.g. pi, opencode). Each agent has its own startup cost, system prompt, and tool-call overhead — that's what we're trying to measure.",
+  backend: "The local LLM server (e.g. ollama, lmstudio). Same model can perform differently across backends due to quantization, scheduler, and runtime choices.",
+  model:   "The model id from your config (e.g. gemma4, qwen3.6). The actual provider-specific alias may differ — see results.json for the exact string passed to each agent.",
+  combo: "Which agent + LLM backend was tested. Format is agent+backend — e.g. 'pi+ollama' means the pi CLI was talking to a model served by Ollama. Lets you compare the same model across different agent harnesses.",
+  wall_median: "Wall time = total elapsed seconds from launching the agent until its final byte of output. It's literally how long you'd wait by the clock on the wall. Includes model loading, prompt processing, generation, and any agent overhead. 'Median' is the middle value across iterations — robust against a single slow outlier.",
+  wall_mean: "Average wall time across iterations. More sensitive to outliers than median; if mean and median diverge, runs were inconsistent.",
+  wall_stdev: "Population standard deviation of wall time across iterations. Roughly: how much each run varied from the average. Lower = more consistent. A high stdev with a slow first run usually means the model was cold-loading.",
+  ttft_mean: "Time-to-first-token (mean): how many seconds passed between launching the agent and the first character of output appearing on stdout. Lower = the agent feels snappier. Only meaningful when 'streamed' is yes; if streamed is no, the agent buffered everything until the end and ttft equals wall time.",
+  throughput: "End-to-end output speed in tokens per second = estimated output tokens ÷ wall time. This includes ALL overhead (model load, prompt processing, agent startup), not just raw generation. So a low number doesn't necessarily mean slow generation — it can mean the agent has heavy setup.",
+  streamed: "Did the agent emit output incrementally as the model generated it? yes = streaming (output appears progressively); no = the agent buffered the entire response and printed it at the very end. When no, time-to-first-token is meaningless because the first byte arrives at the same moment as the last byte.",
+  html: "Across all iterations, did every captured output look like an HTML document (contains <html or <!doctype)? A quick sanity check that the model produced HTML rather than refusing the prompt or asking clarifying questions.",
+  buttons: "Across all iterations, did every captured output contain at least one <button tag? More targeted check matching this benchmark's prompt, which asks for two buttons.",
+  iter: "Iteration number (0-indexed). Warmup runs are excluded from this table — only the timed runs count.",
+  wall_s: "Wall time for this single iteration in seconds — from launching the agent until its last byte of output. Same definition as 'wall median' in the summary above, just for one specific iteration.",
+  ttft_s: "Time-to-first-token for this single iteration, in seconds. Null if no output was captured at all (process errored before any output).",
+  chars: "Total characters of stdout captured for this iteration. Useful for spotting tiny refusal/clarification responses (~100 chars) versus real code generations (~1000s of chars).",
+  tokens_est: "Rough output token estimate using chars ÷ 4. Real tokenization is model-dependent, but this is in the right ballpark for English/code and lets you compare runs against each other.",
+  tok_per_s: "Estimated tokens per second for this iteration = estimated tokens ÷ wall time. Includes all overhead, not just raw generation.",
+  rc: "Process return code. 0 means a clean exit. Non-zero means the process errored. Negative values are POSIX signals — for example, -15 = SIGTERM (the script killed it after a hang).",
+  output: "Filename of the captured raw output, located in the same results directory as this results.json. If the model produced HTML, you can open the file directly in a browser to see whether the generated site actually works."
+};
+
+const $ = sel => document.querySelector(sel);
+const dz = $('#dz'), filein = $('#filein'), errEl = $('#err'), report = $('#report');
+
+dz.addEventListener('click', () => filein.click());
+dz.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); filein.click(); } });
+filein.addEventListener('change', e => e.target.files[0] && load(e.target.files[0]));
+['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => {
+  e.preventDefault(); dz.classList.add('hover');
+}));
+['dragleave','dragend','drop'].forEach(ev => dz.addEventListener(ev, () => dz.classList.remove('hover')));
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) load(f);
+});
+
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function badge(b) {
+  if (b === true)  return '<span class="badge badge-yes">yes</span>';
+  if (b === false) return '<span class="badge badge-no">no</span>';
+  return '<span class="badge badge-na">–</span>';
+}
+function num(v, dp = 2) {
+  if (v === null || v === undefined || v === '') return '–';
+  const n = Number(v);
+  if (!isFinite(n)) return esc(v);
+  return n.toFixed(dp);
+}
+function th(label, key, opts={}) {
+  const cls = opts.num ? 'num' : '';
+  const title = FIELD_DOCS[key] ? ` title="${esc(FIELD_DOCS[key])}"` : '';
+  return `<th class="${cls}"${title}>${esc(label)}</th>`;
+}
+
+// Find best index. dir: 'min' or 'max'. Ignores null/undefined/NaN.
+function bestIdx(values, dir) {
+  let best = -1, bv = null;
+  values.forEach((v, i) => {
+    if (v === null || v === undefined) return;
+    const n = Number(v);
+    if (!isFinite(n)) return;
+    if (best === -1 || (dir === 'min' ? n < bv : n > bv)) { best = i; bv = n; }
+  });
+  return best;
+}
+// Returns 'winner' | 'loser' | '' for cell at index i given column direction
+function rankCls(values, i, dir) {
+  const valid = values.map(Number).filter(n => isFinite(n));
+  if (valid.length < 2) return '';
+  const best = bestIdx(values, dir);
+  if (i === best) return 'winner';
+  return 'loser';
+}
+function bar(value, max, klass='') {
+  if (value === null || value === undefined || !isFinite(value) || max <= 0) return num(value, 2);
+  const pct = Math.max(2, Math.min(100, (value / max) * 100));
+  return `<span class="bar-wrap"><span class="bar"><span class="bar-fill ${klass}" style="width:${pct}%"></span></span><span class="bar-num">${num(value, 2)}</span></span>`;
+}
+
+async function load(file) {
+  errEl.textContent = '';
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    render(data);
+  } catch (e) {
+    errEl.textContent = 'Failed to parse JSON: ' + e.message;
+    report.classList.add('hidden');
+  }
+}
+
+function render(data) {
+  const cfg = data.config || {};
+  const combos = data.combos || [];
+  const pre = data.pre_existing || {};
+
+  let html = '';
+  html += `<div class="meta"><strong>${esc(data.timestamp)}</strong> · ${esc(data.platform)}<br>
+    Model (Ollama): <code>${esc(cfg.model_ollama)}</code> · iterations: ${esc(cfg.iterations)} (warmup ${esc(cfg.warmup)})</div>`;
+
+  // ---- Summary ----
+  // Build per-column arrays so we can rank winners.
+  const summaries = combos.map(c => c.summary || {});
+  const cols = {
+    wall_med:   summaries.map(s => s.wall_s_median),
+    wall_mean:  summaries.map(s => s.wall_s_mean),
+    wall_stdev: summaries.map(s => s.wall_s_stdev),
+    ttft:       summaries.map(s => s.ttft_s_mean),
+    throughput: summaries.map(s => s.throughput_tok_per_s_mean_est),
+  };
+  const dirs = { wall_med:'min', wall_mean:'min', wall_stdev:'min', ttft:'min', throughput:'max' };
+  // Max-of-column for bar widths
+  const maxOf = arr => Math.max(...arr.map(Number).filter(n => isFinite(n)), 0);
+  const maxes = {
+    wall_med: maxOf(cols.wall_med),
+    wall_mean: maxOf(cols.wall_mean),
+    wall_stdev: maxOf(cols.wall_stdev),
+    ttft: maxOf(cols.ttft),
+    throughput: maxOf(cols.throughput),
+  };
+
+  html += '<h2>Summary</h2><div class="tbl-wrap"><table><thead><tr>';
+  html += th('Agent',   'agent');
+  html += th('Backend', 'backend');
+  html += th('Model',   'model');
+  html += th('wall median (s)', 'wall_median', {num:true});
+  html += th('wall mean (s)',   'wall_mean',   {num:true});
+  html += th('wall stdev',      'wall_stdev',  {num:true});
+  html += th('ttft mean (s)',   'ttft_mean',   {num:true});
+  html += th('throughput tok/s','throughput',  {num:true});
+  html += th('streamed',        'streamed');
+  html += th('valid HTML',      'html');
+  html += th('buttons',         'buttons');
+  html += '</tr></thead><tbody>';
+  combos.forEach((c, i) => {
+    const s = c.summary || {};
+    // Fall back to splitting label if structured fields missing (legacy results).
+    const parts = (c.label || '').split('+');
+    const agent   = c.agent   || parts[0] || '';
+    const backend = c.backend || parts[1] || '';
+    const model   = c.model_id|| parts[2] || '';
+    html += '<tr>';
+    html += `<td class="label">${esc(agent)}</td>`;
+    html += `<td>${esc(backend)}</td>`;
+    html += `<td>${esc(model)}</td>`;
+    html += `<td class="num ${rankCls(cols.wall_med, i, dirs.wall_med)}">${bar(s.wall_s_median, maxes.wall_med)}</td>`;
+    html += `<td class="num ${rankCls(cols.wall_mean, i, dirs.wall_mean)}">${bar(s.wall_s_mean, maxes.wall_mean)}</td>`;
+    html += `<td class="num ${rankCls(cols.wall_stdev, i, dirs.wall_stdev)}">${num(s.wall_s_stdev, 2)}</td>`;
+    html += `<td class="num ${rankCls(cols.ttft, i, dirs.ttft)}">${num(s.ttft_s_mean, 2)}</td>`;
+    html += `<td class="num ${rankCls(cols.throughput, i, dirs.throughput)}">${bar(s.throughput_tok_per_s_mean_est, maxes.throughput, 'good')}</td>`;
+    html += `<td>${badge(s.streamed_all)}</td>`;
+    html += `<td>${badge(s.all_runs_html)}</td>`;
+    html += `<td>${badge(s.all_runs_have_buttons)}</td>`;
+    html += '</tr>';
+  });
+  html += '</tbody></table></div>';
+  html += `<p class="legend"><strong>★</strong> marks the winner per column. Lower is better for wall/ttft/stdev; higher is better for throughput.
+    Throughput = est. output tokens ÷ wall time (end-to-end, includes prompt processing).
+    Streamed = no → agent buffered the response, so ttft equals wall time.</p>`;
+
+  // ---- Per-iteration ----
+  html += '<h2>Per-iteration detail</h2>';
+  for (const c of combos) {
+    const its = c.iterations || [];
+    const ic = {
+      wall:   its.map(i => i.wall_s),
+      ttft:   its.map(i => i.ttft_s),
+      chars:  its.map(i => i.output_chars),
+      tokens: its.map(i => i.output_tokens_est),
+      tps:    its.map(i => i.throughput_tok_per_s_est),
+    };
+    html += `<section class="combo"><h3>${esc(c.label)}</h3><div class="tbl-wrap"><table><thead><tr>`;
+    html += th('iter','iter');
+    html += th('wall (s)','wall_s',{num:true});
+    html += th('ttft (s)','ttft_s',{num:true});
+    html += th('chars','chars',{num:true});
+    html += th('tokens (est)','tokens_est',{num:true});
+    html += th('tok/s','tok_per_s',{num:true});
+    html += th('streamed','streamed');
+    html += th('html?','html');
+    html += th('buttons?','buttons');
+    html += th('rc','rc',{num:true});
+    html += th('output','output');
+    html += '</tr></thead><tbody>';
+    its.forEach((it, i) => {
+      html += '<tr>';
+      html += `<td class="num">${esc(it.iter)}</td>`;
+      html += `<td class="num ${rankCls(ic.wall, i, 'min')}">${num(it.wall_s, 2)}</td>`;
+      html += `<td class="num ${rankCls(ic.ttft, i, 'min')}">${num(it.ttft_s, 2)}</td>`;
+      html += `<td class="num">${esc(it.output_chars)}</td>`;
+      html += `<td class="num">${esc(it.output_tokens_est)}</td>`;
+      html += `<td class="num ${rankCls(ic.tps, i, 'max')}">${num(it.throughput_tok_per_s_est, 2)}</td>`;
+      html += `<td>${badge(it.streamed)}</td>`;
+      html += `<td>${badge(it.looks_like_html)}</td>`;
+      html += `<td>${badge(it.has_button)}</td>`;
+      html += `<td class="num">${(it.rc === 0) ? '<span class="badge badge-yes">0</span>' : `<span class="badge badge-no">${esc(it.rc)}</span>`}</td>`;
+      html += `<td><code>${esc(it.output_file)}</code></td>`;
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></section>';
+  }
+
+  html += `<h2>Prompt</h2><pre>${esc(cfg.prompt || '')}</pre>`;
+  html += `<h2>Pre-flight inventory</h2><pre>${esc(JSON.stringify(pre, null, 2))}</pre>`;
+
+  report.innerHTML = html;
+  report.classList.remove('hidden');
+}
+</script>
+</body>
+</html>
