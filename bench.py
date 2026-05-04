@@ -27,6 +27,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -36,7 +37,11 @@ from statistics import mean, median, pstdev
 
 ROOT = Path(__file__).parent.resolve()
 STATE_FILE = ROOT / ".bench-state.json"
-RESULTS_DIR = ROOT / "results"
+# Results live under the user's home so re-cloning the repo doesn't clobber
+# them (and so you can collect runs from multiple checkouts in one place).
+# Override with $AGENT_BENCH_RESULTS_DIR.
+RESULTS_DIR = Path(os.environ.get("AGENT_BENCH_RESULTS_DIR")
+                    or Path.home() / "ai-bench" / "results")
 IS_MAC = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 IS_ARM64 = platform.machine() in ("arm64", "aarch64")
@@ -58,6 +63,50 @@ def err(msg):
 
 def which(cmd):
     return shutil.which(cmd)
+
+
+class Ticker:
+    """Background ticker that overwrites a single stderr line with elapsed time.
+
+    Use as a context manager around a long-running call:
+        with Ticker("    iter-0"):
+            ...do work...
+
+    Cleanly clears its line on exit, so subsequent log() output prints normally.
+    Disabled (becomes a no-op) if stderr isn't a TTY — keeps log files clean.
+    """
+    INTERVAL = 1.0
+
+    def __init__(self, prefix):
+        self.prefix = prefix
+        self._stop = threading.Event()
+        self._thread = None
+        self._enabled = sys.stderr.isatty()
+
+    def __enter__(self):
+        if not self._enabled:
+            return self
+        self._start = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        if not self._enabled:
+            return False
+        self._stop.set()
+        self._thread.join(timeout=2)
+        # Clear the line so the next log() print doesn't collide.
+        sys.stderr.write("\r" + " " * 80 + "\r")
+        sys.stderr.flush()
+        return False
+
+    def _run(self):
+        while not self._stop.is_set():
+            elapsed = int(time.monotonic() - self._start)
+            sys.stderr.write(f"\r{self.prefix} ⏱ {elapsed}s")
+            sys.stderr.flush()
+            self._stop.wait(self.INTERVAL)
 
 
 def cpu_info():
@@ -533,15 +582,16 @@ def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None,
             log(f"    [{done + 1}/{total}] starting {label} {tag}"
                 f" — elapsed {int(elapsed)}s"
                 + (f", est remaining ~{mins}m" if rate else ""))
-        if direct:
-            if direct["backend"] == "ollama":
-                result = run_backend_direct_ollama(direct["model_alias"], direct["prompt"])
+        with Ticker(f"      {tag}"):
+            if direct:
+                if direct["backend"] == "ollama":
+                    result = run_backend_direct_ollama(direct["model_alias"], direct["prompt"])
+                else:
+                    result = {"rc": 1, "wall_s": 0, "ttft_s": None, "last_byte_s": None,
+                              "stdout": "", "stderr": f"direct mode not supported for {direct['backend']}",
+                              "end_reason": "exit", "backend_stats": None}
             else:
-                result = {"rc": 1, "wall_s": 0, "ttft_s": None, "last_byte_s": None,
-                          "stdout": "", "stderr": f"direct mode not supported for {direct['backend']}",
-                          "end_reason": "exit", "backend_stats": None}
-        else:
-            result = run_agent_streamed(cmd, env)
+                result = run_agent_streamed(cmd, env)
         if progress is not None:
             progress["done"] += 1
         out_path = run_dir / f"{label}__{tag}.txt"

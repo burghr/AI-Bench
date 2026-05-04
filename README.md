@@ -147,9 +147,12 @@ AI-Bench/
 ├── bench.config.json   # default matrix
 ├── bench.smoke.json    # quick-validation matrix (1 iter, smallest model)
 ├── viewer.html         # static results viewer
-├── results/            # per-run output (gitignored)
 └── README.md
+
+~/ai-bench/results/<timestamp>/   # per-run output (in your home dir, not the repo)
 ```
+
+**Why home dir for results?** So `git pull` or re-cloning the repo doesn't blow away your previous benchmark history. Override the location with the `AGENT_BENCH_RESULTS_DIR` environment variable if you want.
 
 ## License
 
