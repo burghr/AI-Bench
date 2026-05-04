@@ -17,6 +17,10 @@ For each iteration of each combination:
 - **streamed?** — whether the agent emitted output incrementally or buffered it all to the end.
 - **valid HTML / has buttons** — quick task-completion checks (configurable via the prompt).
 
+When the `direct` agent is enabled, the bench also captures **precise backend stats** from Ollama's `/api/generate` response: real `eval_count`, `eval_duration`, `prompt_eval_count`, `prompt_eval_duration`. From these we compute the model's actual **eval tok/s** (raw generation rate) and **prompt tok/s** (input ingestion rate) with no agent overhead. The viewer surfaces these in a "Direct backend stats" section so you can see how much of an agent's wall time is overhead vs. raw model speed.
+
+Each results file also captures the host's **CPU brand string** (e.g. `Apple M2 Pro`, `Intel(R) Core(TM) i9-9880H`) so the viewer can label runs precisely instead of just `arm64` / `x86_64`.
+
 Each iteration's full stdout is saved to disk so you can open the generated artifact (e.g. an HTML page) and confirm it actually works, not just that it parses.
 
 ## Requirements
@@ -75,7 +79,7 @@ Everything lives in `bench.config.json`:
 | field | meaning |
 |---|---|
 | `models` | List of models to test. Each entry has a human-readable `id` and per-backend aliases (since Ollama and LM Studio name the same model differently). A model is skipped for backends it has no alias for. |
-| `agents` | Which agents to invoke. Currently `pi` and `opencode` are registered. |
+| `agents` | Which agents to invoke. `pi`, `opencode`, and `direct` are built-in. `direct` is a pseudo-agent that calls the backend's HTTP API directly — used to capture the model's *real* tokens-per-second from the backend's own counters (no agent overhead). |
 | `backends` | Which local LLM servers to use. Currently `ollama` and `lmstudio`. |
 | `iterations` | Timed runs per combination. |
 | `warmup` | Untimed runs per combination, executed first. Hides cold model-load latency from the timed numbers. |

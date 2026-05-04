@@ -1,18 +1,10 @@
 {
   "models": [
-    {
-      "id": "qwen3-1.7b",
-      "ollama": "qwen3:1.7b",
-      "lmstudio": "qwen/qwen3-1.7b"
-    },
-    {
-      "id": "gemma4",
-      "ollama": "gemma4",
-      "lmstudio": "google/gemma-4-it"
-    }
+    { "id": "qwen3-1.7b", "ollama": "qwen3:1.7b" },
+    { "id": "gemma4",     "ollama": "gemma4" }
   ],
-  "agents": ["pi", "opencode"],
-  "backends": ["ollama", "lmstudio"],
+  "agents":   ["direct", "pi", "opencode"],
+  "backends": ["ollama"],
   "iterations": 3,
   "warmup": 1,
   "prompt": "Build a single-page website in plain HTML, CSS, and JavaScript with two buttons. The first button fetches a random joke from https://icanhazdadjoke.com/ (send header 'Accept: application/json') and displays it on the page. The second button toggles dark mode by adding/removing a 'dark' CSS class on the body, with appropriate styles for both modes. Output a single complete HTML file with inline <style> and <script> tags. No build tools, no frameworks. Output only the HTML, no commentary. Ask no questions and make any required assumptions yourself."

@@ -2,9 +2,9 @@
   "models": [
     { "id": "qwen3-1.7b", "ollama": "qwen3:1.7b" }
   ],
-  "agents": ["pi", "opencode"],
+  "agents":   ["direct", "pi"],
   "backends": ["ollama"],
   "iterations": 1,
   "warmup": 0,
-  "prompt": "Output a single complete HTML file with two buttons: button A fetches a joke from https://icanhazdadjoke.com/ (Accept: application/json) and shows it; button B toggles a 'dark' class on body. Inline <style> and <script>, no frameworks. Output only the HTML. Ask no questions and make any required assumptions yourself."
+  "prompt": "Output a single complete HTML file with two buttons. Inline CSS and JS. Output only the HTML."
 }

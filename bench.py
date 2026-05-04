@@ -60,6 +60,31 @@ def which(cmd):
     return shutil.which(cmd)
 
 
+def cpu_info():
+    """Best-effort human-readable CPU brand string.
+
+    On macOS: 'Apple M2 Pro', 'Apple M1 Max', 'Intel(R) Core(TM) i9-9880H ...'.
+    On Linux: the 'Model name' line from /proc/cpuinfo.
+    Returns None if it can't determine.
+    """
+    try:
+        if IS_MAC:
+            r = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        if IS_LINUX:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
+
 def run(cmd, *, check=True, capture=False, env=None, timeout=None):
     shell = isinstance(cmd, str)
     if capture:
@@ -412,7 +437,70 @@ AGENTS = {
         "build_cmd": _opencode_cmd,
         "is_installed": lambda: bool(which("opencode")),
     },
+    # `direct` is a pseudo-agent that hits the backend's HTTP API directly,
+    # bypassing any CLI wrapper. Lets us measure the *real* model generation
+    # rate (in tokens/sec, from the backend's own counters) so you can tell
+    # how much of the agent runs is overhead vs raw model speed.
+    "direct": {
+        "supports_backends": ["ollama"],   # lmstudio direct mode is feasible but TODO
+        "build_cmd": None,                  # special-cased — no subprocess
+        "is_installed": lambda: True,
+        "direct": True,
+    },
 }
+
+
+def run_backend_direct_ollama(model_alias, prompt, *, total_timeout=900):
+    """Hit ollama's /api/generate (non-streaming) and capture precise stats."""
+    body = json.dumps({"model": model_alias, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    start = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=total_timeout) as r:
+            payload = r.read()
+        end = time.monotonic()
+        j = json.loads(payload.decode("utf-8"))
+        out = j.get("response", "") or ""
+        # All durations are in nanoseconds.
+        load_s        = (j.get("load_duration")        or 0) / 1e9
+        prompt_eval_s = (j.get("prompt_eval_duration") or 0) / 1e9
+        eval_s        = (j.get("eval_duration")        or 0) / 1e9
+        prompt_count  = j.get("prompt_eval_count") or 0
+        eval_count    = j.get("eval_count") or 0
+        return {
+            "rc": 0,
+            "wall_s": end - start,
+            "ttft_s": None,
+            "last_byte_s": None,
+            "stdout": out,
+            "stderr": "",
+            "end_reason": "exit",
+            "backend_stats": {
+                "load_s": round(load_s, 4),
+                "prompt_eval_count": prompt_count,
+                "prompt_eval_s": round(prompt_eval_s, 4),
+                "prompt_tok_per_s": round(prompt_count / prompt_eval_s, 2) if prompt_eval_s > 0 else None,
+                "eval_count": eval_count,
+                "eval_s": round(eval_s, 4),
+                "eval_tok_per_s": round(eval_count / eval_s, 2) if eval_s > 0 else None,
+            },
+        }
+    except Exception as e:
+        end = time.monotonic()
+        return {
+            "rc": 1,
+            "wall_s": end - start,
+            "ttft_s": None,
+            "last_byte_s": None,
+            "stdout": "",
+            "stderr": str(e),
+            "end_reason": "exit",
+            "backend_stats": None,
+        }
 
 
 def restore_opencode_config():
@@ -423,14 +511,20 @@ def restore_opencode_config():
 
 
 # ---- benchmark -------------------------------------------------------------
-def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None):
+def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None,
+              direct=None):
+    """Run one combination N+warmup times and summarize.
+
+    If `direct` is set, it should be a dict {backend, model_alias, prompt}
+    and we'll bypass the subprocess path and hit the backend's HTTP API
+    directly to capture precise model stats.
+    """
     log(f"  ▶ {label}  (warmup={warmup}, iters={n_iter})")
     iters = []
     for i in range(warmup + n_iter):
         is_warmup = i < warmup
         tag = f"warmup-{i}" if is_warmup else f"iter-{i - warmup}"
         if progress is not None:
-            progress["done"] += 0  # noop; counter advances after run
             done, total = progress["done"], progress["total"]
             elapsed = time.monotonic() - progress["start"]
             rate = elapsed / done if done else 0
@@ -439,48 +533,59 @@ def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None):
             log(f"    [{done + 1}/{total}] starting {label} {tag}"
                 f" — elapsed {int(elapsed)}s"
                 + (f", est remaining ~{mins}m" if rate else ""))
-        result = run_agent_streamed(cmd, env)
+        if direct:
+            if direct["backend"] == "ollama":
+                result = run_backend_direct_ollama(direct["model_alias"], direct["prompt"])
+            else:
+                result = {"rc": 1, "wall_s": 0, "ttft_s": None, "last_byte_s": None,
+                          "stdout": "", "stderr": f"direct mode not supported for {direct['backend']}",
+                          "end_reason": "exit", "backend_stats": None}
+        else:
+            result = run_agent_streamed(cmd, env)
         if progress is not None:
             progress["done"] += 1
         out_path = run_dir / f"{label}__{tag}.txt"
         out_path.write_text(result["stdout"])
         if result["stderr"]:
             (run_dir / f"{label}__{tag}.stderr.log").write_text(result["stderr"])
+        backend_stats = result.get("backend_stats")
+        extra_log = ""
+        if backend_stats and backend_stats.get("eval_tok_per_s") is not None:
+            extra_log = (f" eval={backend_stats['eval_count']}tok @ "
+                         f"{backend_stats['eval_tok_per_s']}t/s")
         log(
             f"    {tag}: wall={result['wall_s']:.2f}s "
             f"ttft={'%.2f' % result['ttft_s'] if result['ttft_s'] else '–'}s "
-            f"chars={len(result['stdout'])} rc={result['rc']}"
+            f"chars={len(result['stdout'])} rc={result['rc']}{extra_log}"
         )
         if is_warmup:
             continue
         tokens = estimate_tokens(result["stdout"])
         wall_s = max(result["wall_s"], 1e-6)
-        # `streamed` = first byte arrived meaningfully before the last byte.
-        # When false (e.g. pi -p), tok/s_streaming is meaningless, so we report
-        # only end-to-end throughput.
         streamed = bool(
             result["ttft_s"] is not None
             and result.get("last_byte_s") is not None
             and (result["last_byte_s"] - result["ttft_s"]) > 0.5
         )
         text = result["stdout"].lower()
-        iters.append(
-            {
-                "iter": i - warmup,
-                "wall_s": round(result["wall_s"], 3),
-                "ttft_s": round(result["ttft_s"], 3) if result["ttft_s"] else None,
-                "output_chars": len(result["stdout"]),
-                "output_tokens_est": tokens,
-                "throughput_tok_per_s_est": round(tokens / wall_s, 2),
-                "streamed": streamed,
-                "rc": result["rc"],
-                "output_file": out_path.name,
-                "looks_like_html": ("<html" in text) or ("<!doctype" in text),
-                "has_button": "<button" in text,
-                "has_script": "<script" in text,
-                "end_reason": result.get("end_reason"),
-            }
-        )
+        iter_row = {
+            "iter": i - warmup,
+            "wall_s": round(result["wall_s"], 3),
+            "ttft_s": round(result["ttft_s"], 3) if result["ttft_s"] else None,
+            "output_chars": len(result["stdout"]),
+            "output_tokens_est": tokens,
+            "throughput_tok_per_s_est": round(tokens / wall_s, 2),
+            "streamed": streamed,
+            "rc": result["rc"],
+            "output_file": out_path.name,
+            "looks_like_html": ("<html" in text) or ("<!doctype" in text),
+            "has_button": "<button" in text,
+            "has_script": "<script" in text,
+            "end_reason": result.get("end_reason"),
+        }
+        if backend_stats:
+            iter_row["backend_stats"] = backend_stats
+        iters.append(iter_row)
     return summarize(label, iters)
 
 
@@ -661,13 +766,18 @@ def main():
                     continue
                 model_alias = m[backend]
                 label = f"{agent}+{backend}+{m['id']}"
-                cmd, extra_env = AGENTS[agent]["build_cmd"](model_alias, backend, prompt)
+                is_direct = AGENTS[agent].get("direct", False)
+                if is_direct:
+                    cmd, extra_env = None, {}
+                else:
+                    cmd, extra_env = AGENTS[agent]["build_cmd"](model_alias, backend, prompt)
                 env = os.environ.copy()
                 env.update(extra_env)
                 planned.append({
                     "label": label, "agent": agent, "backend": backend,
                     "model_id": m["id"], "model_alias": model_alias,
                     "cmd": cmd, "env": env,
+                    "direct": {"backend": backend, "model_alias": model_alias, "prompt": prompt} if is_direct else None,
                 })
 
     if not planned:
@@ -679,13 +789,16 @@ def main():
     log(f"Plan: {len(planned)} combos × {warmup + n_iter} runs = {total_runs} total")
 
     for p in planned:
-        result = bench_one(p["label"], p["cmd"], p["env"], run_dir, n_iter, warmup, progress)
+        result = bench_one(p["label"], p["cmd"], p["env"], run_dir, n_iter, warmup,
+                           progress, direct=p.get("direct"))
         # Tag combo with its dimensions for the viewer.
         result.update({"agent": p["agent"], "backend": p["backend"], "model_id": p["model_id"]})
         combos.append(result)
     results = {
         "timestamp": ts,
         "platform": platform.platform(),
+        "cpu": cpu_info(),
+        "machine": platform.machine(),
         "config": cfg,
         "pre_existing": pre,
         "combos": combos,

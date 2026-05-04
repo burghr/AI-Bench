@@ -164,7 +164,8 @@ const FIELD_DOCS = {
   agent:   "The CLI/agent under test (e.g. pi, opencode). Each agent has its own startup cost, system prompt, and tool-call overhead — that's what we're trying to measure.",
   backend: "The local LLM server (e.g. ollama, lmstudio). Same model can perform differently across backends due to quantization, scheduler, and runtime choices.",
   model:   "The model id from your config (e.g. gemma4, qwen3.6). The actual provider-specific alias may differ — see results.json for the exact string passed to each agent.",
-  run:     "Which loaded results file this row came from. Inferred from the file's platform + timestamp (e.g. 'Apple Silicon · 5/4 11:29'). Different runs can be different machines, dates, or configs — the comparison table groups them by combo so you can see how the same agent+backend+model performed across them.",
+  run:     "Which loaded results file this row came from. Inferred from the file's CPU + timestamp (e.g. 'Apple M2 Pro · 5/4 11:29'). Different runs can be different machines, dates, or configs — the comparison table groups them by combo so you can see how the same agent+backend+model performed across them.",
+  metric:  "Which scalar from the run summary is being compared. Wall median is the headline 'how long did this take' number (lower is better). Throughput is tokens/sec end-to-end (higher is better). Both are from the agent's perspective — for the model's raw speed, see the Direct backend stats section.",
   combo: "Which agent + LLM backend was tested. Format is agent+backend — e.g. 'pi+ollama' means the pi CLI was talking to a model served by Ollama. Lets you compare the same model across different agent harnesses.",
   wall_median: "Wall time = total elapsed seconds from launching the agent until its final byte of output. It's literally how long you'd wait by the clock on the wall. Includes model loading, prompt processing, generation, and any agent overhead. 'Median' is the middle value across iterations — robust against a single slow outlier.",
   wall_mean: "Average wall time across iterations. More sensitive to outliers than median; if mean and median diverge, runs were inconsistent.",
@@ -223,16 +224,26 @@ async function loadFiles(fileList) {
 }
 
 function labelFor(filename, data) {
-  // Build something like "Apple Silicon · 5/4 11:29" from platform+timestamp.
+  // Prefer the precise CPU brand string when bench.py provided it.
+  // Falls back to arch family if running on an older results.json.
   const ts = data.timestamp || '';
   const plat = data.platform || '';
-  let arch = '';
-  if (/arm64|aarch64/.test(plat)) arch = 'Apple Silicon';
-  else if (/x86_64|amd64/.test(plat)) arch = 'Intel/x86';
-  // Format timestamp YYYYMMDD-HHMMSS to M/D HH:MM
+  const cpu = (data.cpu || '').trim();
+  let cpuShort = '';
+  if (cpu) {
+    cpuShort = cpu
+      .replace(/Apple\s+/i, '')                       // 'Apple M2 Pro' → 'M2 Pro'
+      .replace(/\(R\)|\(TM\)/g, '')                   // 'Intel(R) Core(TM)...' → 'Intel Core...'
+      .replace(/\s+CPU\s*@\s*\d.*$/i, '')             // strip ' CPU @ 2.30GHz'
+      .replace(/\s+\d+-Core Processor.*/i, '')        // 'AMD Ryzen 9 5900X 12-Core Processor' → 'AMD Ryzen 9 5900X'
+      .trim();
+  } else {
+    if (/arm64|aarch64/.test(plat)) cpuShort = 'Apple Silicon';
+    else if (/x86_64|amd64/.test(plat)) cpuShort = 'Intel/x86';
+  }
   const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/);
   const tstr = m ? `${+m[2]}/${+m[3]} ${m[4]}:${m[5]}` : ts;
-  return [arch, tstr].filter(Boolean).join(' · ') || filename;
+  return [cpuShort, tstr].filter(Boolean).join(' · ') || filename;
 }
 
 function removeSet(id) {
@@ -287,14 +298,15 @@ function bar(value, max, klass='') {
 }
 
 function renderAll() {
-  // Render the loaded chips
-  loadedEl.innerHTML = state.sets.map(s =>
-    `<span class="chip" data-id="${s.id}" title="${esc(s.filename)}">
+  // Render the loaded chips. Tooltip shows the full CPU brand string + filename.
+  loadedEl.innerHTML = state.sets.map(s => {
+    const tip = [s.data.cpu, s.data.platform, s.filename].filter(Boolean).join(' · ');
+    return `<span class="chip" data-id="${s.id}" title="${esc(tip)}">
        <span class="swatch" style="background:${s.color}"></span>
        <span class="name">${esc(s.label)}</span>
        <button class="x" aria-label="Remove" data-rm="${s.id}">×</button>
-     </span>`
-  ).join('');
+     </span>`;
+  }).join('');
   loadedEl.querySelectorAll('button[data-rm]').forEach(btn => {
     btn.addEventListener('click', e => { e.stopPropagation(); removeSet(+btn.dataset.rm); });
   });
@@ -387,35 +399,100 @@ function renderCompare(sets) {
   html += '</tbody></table></div>';
   html += `<p class="legend">★ marks the fastest/best value within each combo across the loaded runs. Lower is better for wall/ttft/stdev; higher for throughput.</p>`;
 
-  // Pivoted speedup table — one combo per row, columns are runs, cells are the wall_median.
+  // Pivoted speedup table when exactly two sets are loaded.
   if (sets.length === 2) {
     const A = sets[0], B = sets[1];
-    html += `<h2>Speedup: ${esc(A.label)} vs ${esc(B.label)}</h2>`;
+    html += `<h2>Head-to-head: ${esc(A.label)} vs ${esc(B.label)}</h2>`;
     html += '<div class="tbl-wrap"><table><thead><tr>';
     html += th('Combo','combo');
-    html += `<th class="num">${esc(A.label)} (s)</th>`;
-    html += `<th class="num">${esc(B.label)} (s)</th>`;
-    html += '<th class="num">faster by</th>';
+    html += th('Metric','metric');
+    html += `<th class="num">${esc(A.label)}</th>`;
+    html += `<th class="num">${esc(B.label)}</th>`;
+    html += '<th class="num">winner</th>';
     html += '</tr></thead><tbody>';
+    const metrics = [
+      { key: 'wall_s_median',                   label: 'wall median (s, ↓ better)',   unit: 's', dir: 'min' },
+      { key: 'throughput_tok_per_s_mean_est',   label: 'throughput tok/s (↑ better)', unit: 't/s', dir: 'max' },
+    ];
     for (const c of sortedCombos) {
       const ra = c.rows.find(r => r.set.id === A.id);
       const rb = c.rows.find(r => r.set.id === B.id);
-      const va = ra ? Number(ra.summary.wall_s_median) : NaN;
-      const vb = rb ? Number(rb.summary.wall_s_median) : NaN;
-      let faster = '';
-      if (isFinite(va) && isFinite(vb)) {
-        const ratio = Math.max(va, vb) / Math.min(va, vb);
-        const winner = vb < va ? B.label : A.label;
-        faster = `${ratio.toFixed(2)}× <span class="sub">(${esc(winner)})</span>`;
-      }
+      metrics.forEach((mk, mi) => {
+        const va = ra ? Number(ra.summary[mk.key]) : NaN;
+        const vb = rb ? Number(rb.summary[mk.key]) : NaN;
+        let faster = '–';
+        if (isFinite(va) && isFinite(vb) && va > 0 && vb > 0) {
+          const ratio = mk.dir === 'min'
+            ? Math.max(va, vb) / Math.min(va, vb)
+            : Math.max(va, vb) / Math.min(va, vb);
+          const winner = (mk.dir === 'min' ? (vb < va) : (vb > va)) ? B : A;
+          faster = `${ratio.toFixed(2)}× <span class="sub">(${esc(winner.label)})</span>`;
+        }
+        html += '<tr>';
+        if (mi === 0) {
+          html += `<td class="label" rowspan="${metrics.length}">${esc(c.label)}</td>`;
+        }
+        html += `<td>${esc(mk.label)}</td>`;
+        html += `<td class="num">${isFinite(va)?num(va,2):'–'} <span class="sub">${esc(mk.unit)}</span></td>`;
+        html += `<td class="num">${isFinite(vb)?num(vb,2):'–'} <span class="sub">${esc(mk.unit)}</span></td>`;
+        html += `<td class="num">${faster}</td>`;
+        html += '</tr>';
+      });
+    }
+    html += '</tbody></table></div>';
+    html += `<p class="legend">"throughput" is end-to-end (output tokens ÷ wall time), so it includes agent startup, prompt processing, and any tool-call overhead. For raw model speed, see the <strong>direct backend</strong> rows below if you ran the <code>direct</code> agent.</p>`;
+  }
+
+  // Backend-direct precision stats — the `direct` pseudo-agent calls Ollama's
+  // /api/generate and captures the model's actual eval/prompt token rates.
+  const directRows = [];
+  for (const s of sets) {
+    for (const c of (s.data.combos || [])) {
+      if ((c.agent || '').toLowerCase() !== 'direct') continue;
+      // Average backend_stats across iterations
+      const its = (c.iterations || []).filter(it => it.backend_stats);
+      if (its.length === 0) continue;
+      const avg = (key) => {
+        const vals = its.map(it => Number(it.backend_stats?.[key])).filter(v => isFinite(v));
+        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      };
+      directRows.push({
+        set: s, combo: c,
+        eval_tok_per_s:   avg('eval_tok_per_s'),
+        prompt_tok_per_s: avg('prompt_tok_per_s'),
+        eval_count:       avg('eval_count'),
+        prompt_eval_count: avg('prompt_eval_count'),
+        load_s:           avg('load_s'),
+        wall_s_median:    c.summary?.wall_s_median,
+      });
+    }
+  }
+  if (directRows.length) {
+    html += `<h2>Direct backend stats <span class="sub">(model truth, no agent)</span></h2>`;
+    html += '<div class="tbl-wrap"><table><thead><tr>';
+    html += th('Combo','combo');
+    html += th('Run','run');
+    html += '<th class="num" title="The model\'s actual generation speed in tokens/sec, computed from the backend\'s eval_count ÷ eval_duration. This is the raw model rate — no agent overhead.">model eval tok/s</th>';
+    html += '<th class="num" title="Prompt processing speed in tokens/sec, from prompt_eval_count ÷ prompt_eval_duration. Indicates how fast the model can ingest the system prompt + user message before generation starts.">prompt tok/s</th>';
+    html += '<th class="num" title="Average number of tokens generated per iteration (eval_count from the backend).">tokens out</th>';
+    html += '<th class="num" title="Average number of input tokens (prompt_eval_count from the backend) — total prompt size after templating.">tokens in</th>';
+    html += '<th class="num" title="Time the model spent loading from disk into memory, averaged across iterations. After the first call this is usually near zero.">load (s)</th>';
+    html += '<th class="num" title="Median total wall time per iteration for this direct backend call. Compare with the agent rows above to see overhead.">wall median (s)</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of directRows) {
       html += '<tr>';
-      html += `<td class="label">${esc(c.label)}</td>`;
-      html += `<td class="num">${isFinite(va)?num(va,2):'–'}</td>`;
-      html += `<td class="num">${isFinite(vb)?num(vb,2):'–'}</td>`;
-      html += `<td class="num">${faster||'–'}</td>`;
+      html += `<td class="label">${esc(r.combo.label)}</td>`;
+      html += `<td class="run-cell"><span class="swatch" style="background:${r.set.color}"></span>${esc(r.set.label)}</td>`;
+      html += `<td class="num">${num(r.eval_tok_per_s, 1)}</td>`;
+      html += `<td class="num">${num(r.prompt_tok_per_s, 1)}</td>`;
+      html += `<td class="num">${num(r.eval_count, 0)}</td>`;
+      html += `<td class="num">${num(r.prompt_eval_count, 0)}</td>`;
+      html += `<td class="num">${num(r.load_s, 2)}</td>`;
+      html += `<td class="num">${num(r.wall_s_median, 2)}</td>`;
       html += '</tr>';
     }
     html += '</tbody></table></div>';
+    html += `<p class="legend">These numbers come from Ollama's <code>/api/generate</code> response (<code>eval_count / eval_duration</code>). Subtract the agent's wall median from the direct row's wall median above to see how much time the agent itself adds.</p>`;
   }
 
   // Per-set details (collapsible) with quality info
