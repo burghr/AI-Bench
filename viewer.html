@@ -114,21 +114,48 @@
     border-radius: 6px; margin: 0.75rem 0; font-size: 0.9rem;
   }
   .err:empty { display: none; }
+
+  /* Loaded files chips */
+  .loaded-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 0.75rem 0; }
+  .loaded-list:empty { display: none; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #fff; border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 6px 4px 12px; font-size: 0.85rem;
+  }
+  .chip .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .chip .name { font-weight: 600; }
+  .chip .sub  { color: var(--muted); font-size: 0.78rem; }
+  .chip .x {
+    border: none; background: transparent; cursor: pointer; color: var(--muted);
+    width: 22px; height: 22px; border-radius: 50%; line-height: 1;
+  }
+  .chip .x:hover { background: var(--bad-soft); color: var(--bad); }
+
+  /* Run-color swatch in table cells */
+  td.run-cell { white-space: nowrap; }
+  td.run-cell .swatch { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  tr.combo-divider td {
+    border-top: 2px solid var(--border); background: var(--hl);
+    font-weight: 600; font-size: 0.78rem; letter-spacing: 0.04em;
+    text-transform: uppercase; color: #374151;
+  }
 </style>
 </head>
 <body>
 
 <h1>agent-bench results viewer</h1>
-<div class="meta">Drop a <code>results.json</code> here, or click to choose one. Hover any column header for an explanation.</div>
+<div class="meta">Drop one or more <code>results.json</code> files here to compare runs side-by-side. Hover any column header for an explanation.</div>
 
 <div class="dropzone" id="dz" role="button" tabindex="0">
-  <input type="file" id="filein" accept="application/json,.json">
-  <div><strong>Choose results.json</strong> or drop it here</div>
+  <input type="file" id="filein" accept="application/json,.json" multiple>
+  <div><strong>Choose results.json file(s)</strong> or drop them here</div>
   <div style="margin-top:0.4rem; font-size:0.85rem;">
-    Typical path: <code>results/&lt;timestamp&gt;/results.json</code>
+    Pick multiple files (or drag & drop several) to compare across machines/runs.
   </div>
 </div>
 
+<div id="loaded" class="loaded-list"></div>
 <div id="err" class="err"></div>
 <main id="report" class="hidden"></main>
 
@@ -137,6 +164,7 @@ const FIELD_DOCS = {
   agent:   "The CLI/agent under test (e.g. pi, opencode). Each agent has its own startup cost, system prompt, and tool-call overhead — that's what we're trying to measure.",
   backend: "The local LLM server (e.g. ollama, lmstudio). Same model can perform differently across backends due to quantization, scheduler, and runtime choices.",
   model:   "The model id from your config (e.g. gemma4, qwen3.6). The actual provider-specific alias may differ — see results.json for the exact string passed to each agent.",
+  run:     "Which loaded results file this row came from. Inferred from the file's platform + timestamp (e.g. 'Apple Silicon · 5/4 11:29'). Different runs can be different machines, dates, or configs — the comparison table groups them by combo so you can see how the same agent+backend+model performed across them.",
   combo: "Which agent + LLM backend was tested. Format is agent+backend — e.g. 'pi+ollama' means the pi CLI was talking to a model served by Ollama. Lets you compare the same model across different agent harnesses.",
   wall_median: "Wall time = total elapsed seconds from launching the agent until its final byte of output. It's literally how long you'd wait by the clock on the wall. Includes model loading, prompt processing, generation, and any agent overhead. 'Median' is the middle value across iterations — robust against a single slow outlier.",
   wall_mean: "Average wall time across iterations. More sensitive to outliers than median; if mean and median diverge, runs were inconsistent.",
@@ -157,20 +185,60 @@ const FIELD_DOCS = {
 };
 
 const $ = sel => document.querySelector(sel);
-const dz = $('#dz'), filein = $('#filein'), errEl = $('#err'), report = $('#report');
+const dz = $('#dz'), filein = $('#filein'), errEl = $('#err'), report = $('#report'), loadedEl = $('#loaded');
+
+// State: array of { id, label, color, data }
+const state = { sets: [], nextId: 1 };
+const PALETTE = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#9333ea', '#0891b2', '#65a30d', '#db2777'];
 
 dz.addEventListener('click', () => filein.click());
 dz.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); filein.click(); } });
-filein.addEventListener('change', e => e.target.files[0] && load(e.target.files[0]));
+filein.addEventListener('change', e => loadFiles(e.target.files));
 ['dragover','dragenter'].forEach(ev => dz.addEventListener(ev, e => {
   e.preventDefault(); dz.classList.add('hover');
 }));
 ['dragleave','dragend','drop'].forEach(ev => dz.addEventListener(ev, () => dz.classList.remove('hover')));
 dz.addEventListener('drop', e => {
   e.preventDefault();
-  const f = e.dataTransfer.files[0];
-  if (f) load(f);
+  loadFiles(e.dataTransfer.files);
 });
+
+async function loadFiles(fileList) {
+  errEl.textContent = '';
+  for (const file of Array.from(fileList || [])) {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const id = state.nextId++;
+      const color = PALETTE[(id - 1) % PALETTE.length];
+      const label = labelFor(file.name, data);
+      state.sets.push({ id, label, color, data, filename: file.name });
+    } catch (e) {
+      errEl.textContent += (errEl.textContent ? '\n' : '') + `Failed to parse ${file.name}: ${e.message}`;
+    }
+  }
+  // Reset input so the same file can be re-loaded after removal.
+  filein.value = '';
+  renderAll();
+}
+
+function labelFor(filename, data) {
+  // Build something like "Apple Silicon · 5/4 11:29" from platform+timestamp.
+  const ts = data.timestamp || '';
+  const plat = data.platform || '';
+  let arch = '';
+  if (/arm64|aarch64/.test(plat)) arch = 'Apple Silicon';
+  else if (/x86_64|amd64/.test(plat)) arch = 'Intel/x86';
+  // Format timestamp YYYYMMDD-HHMMSS to M/D HH:MM
+  const m = ts.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})/);
+  const tstr = m ? `${+m[2]}/${+m[3]} ${m[4]}:${m[5]}` : ts;
+  return [arch, tstr].filter(Boolean).join(' · ') || filename;
+}
+
+function removeSet(id) {
+  state.sets = state.sets.filter(s => s.id !== id);
+  renderAll();
+}
 
 function esc(v) {
   if (v === null || v === undefined) return '';
@@ -218,16 +286,149 @@ function bar(value, max, klass='') {
   return `<span class="bar-wrap"><span class="bar"><span class="bar-fill ${klass}" style="width:${pct}%"></span></span><span class="bar-num">${num(value, 2)}</span></span>`;
 }
 
-async function load(file) {
-  errEl.textContent = '';
-  try {
-    const text = await file.text();
-    const data = JSON.parse(text);
-    render(data);
-  } catch (e) {
-    errEl.textContent = 'Failed to parse JSON: ' + e.message;
+function renderAll() {
+  // Render the loaded chips
+  loadedEl.innerHTML = state.sets.map(s =>
+    `<span class="chip" data-id="${s.id}" title="${esc(s.filename)}">
+       <span class="swatch" style="background:${s.color}"></span>
+       <span class="name">${esc(s.label)}</span>
+       <button class="x" aria-label="Remove" data-rm="${s.id}">×</button>
+     </span>`
+  ).join('');
+  loadedEl.querySelectorAll('button[data-rm]').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); removeSet(+btn.dataset.rm); });
+  });
+
+  if (state.sets.length === 0) {
+    report.innerHTML = '';
     report.classList.add('hidden');
+    return;
   }
+  if (state.sets.length === 1) {
+    renderSingle(state.sets[0]);
+  } else {
+    renderCompare(state.sets);
+  }
+  report.classList.remove('hidden');
+}
+
+function renderSingle(set) {
+  render(set.data);
+}
+
+function renderCompare(sets) {
+  // Collect every unique combo label across all sets.
+  const comboMap = new Map(); // label -> { agent, backend, model_id, rows: [{set, summary}] }
+  for (const s of sets) {
+    for (const c of (s.data.combos || [])) {
+      if (!comboMap.has(c.label)) {
+        const parts = (c.label || '').split('+');
+        comboMap.set(c.label, {
+          label: c.label,
+          agent:   c.agent   || parts[0] || '',
+          backend: c.backend || parts[1] || '',
+          model:   c.model_id|| parts[2] || '',
+          rows: [],
+        });
+      }
+      comboMap.get(c.label).rows.push({ set: s, summary: c.summary || {} });
+    }
+  }
+
+  let html = '';
+  // Header
+  html += `<div class="meta">Comparing <strong>${sets.length}</strong> result sets across <strong>${comboMap.size}</strong> combo${comboMap.size===1?'':'s'}. ★ marks the winner per metric within each combo.</div>`;
+
+  // Comparison table
+  html += '<h2>Comparison</h2><div class="tbl-wrap"><table><thead><tr>';
+  html += th('Combo',         'combo');
+  html += th('Run',           'run');
+  html += th('wall median (s)', 'wall_median', {num:true});
+  html += th('wall mean (s)',   'wall_mean',   {num:true});
+  html += th('wall stdev',      'wall_stdev',  {num:true});
+  html += th('ttft mean (s)',   'ttft_mean',   {num:true});
+  html += th('throughput tok/s','throughput',  {num:true});
+  html += th('streamed',        'streamed');
+  html += th('valid HTML',      'html');
+  html += th('buttons',         'buttons');
+  html += '</tr></thead><tbody>';
+
+  // Sort combos for consistent display
+  const sortedCombos = Array.from(comboMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+  for (const c of sortedCombos) {
+    const cols = {
+      med:   c.rows.map(r => r.summary.wall_s_median),
+      mean:  c.rows.map(r => r.summary.wall_s_mean),
+      stdev: c.rows.map(r => r.summary.wall_s_stdev),
+      ttft:  c.rows.map(r => r.summary.ttft_s_mean),
+      tps:   c.rows.map(r => r.summary.throughput_tok_per_s_mean_est),
+    };
+    const maxOf = arr => Math.max(...arr.map(Number).filter(n => isFinite(n)), 0);
+    const maxes = { med: maxOf(cols.med), mean: maxOf(cols.mean), ttft: maxOf(cols.ttft), tps: maxOf(cols.tps) };
+
+    c.rows.forEach((r, i) => {
+      const s = r.summary;
+      html += '<tr>';
+      if (i === 0) {
+        html += `<td class="label" rowspan="${c.rows.length}">${esc(c.label)}</td>`;
+      }
+      html += `<td class="run-cell"><span class="swatch" style="background:${r.set.color}"></span>${esc(r.set.label)}</td>`;
+      html += `<td class="num ${rankCls(cols.med, i, 'min')}">${bar(s.wall_s_median, maxes.med)}</td>`;
+      html += `<td class="num ${rankCls(cols.mean, i, 'min')}">${bar(s.wall_s_mean, maxes.mean)}</td>`;
+      html += `<td class="num ${rankCls(cols.stdev, i, 'min')}">${num(s.wall_s_stdev, 2)}</td>`;
+      html += `<td class="num ${rankCls(cols.ttft, i, 'min')}">${num(s.ttft_s_mean, 2)}</td>`;
+      html += `<td class="num ${rankCls(cols.tps, i, 'max')}">${bar(s.throughput_tok_per_s_mean_est, maxes.tps, 'good')}</td>`;
+      html += `<td>${badge(s.streamed_all)}</td>`;
+      html += `<td>${badge(s.all_runs_html)}</td>`;
+      html += `<td>${badge(s.all_runs_have_buttons)}</td>`;
+      html += '</tr>';
+    });
+  }
+  html += '</tbody></table></div>';
+  html += `<p class="legend">★ marks the fastest/best value within each combo across the loaded runs. Lower is better for wall/ttft/stdev; higher for throughput.</p>`;
+
+  // Pivoted speedup table — one combo per row, columns are runs, cells are the wall_median.
+  if (sets.length === 2) {
+    const A = sets[0], B = sets[1];
+    html += `<h2>Speedup: ${esc(A.label)} vs ${esc(B.label)}</h2>`;
+    html += '<div class="tbl-wrap"><table><thead><tr>';
+    html += th('Combo','combo');
+    html += `<th class="num">${esc(A.label)} (s)</th>`;
+    html += `<th class="num">${esc(B.label)} (s)</th>`;
+    html += '<th class="num">faster by</th>';
+    html += '</tr></thead><tbody>';
+    for (const c of sortedCombos) {
+      const ra = c.rows.find(r => r.set.id === A.id);
+      const rb = c.rows.find(r => r.set.id === B.id);
+      const va = ra ? Number(ra.summary.wall_s_median) : NaN;
+      const vb = rb ? Number(rb.summary.wall_s_median) : NaN;
+      let faster = '';
+      if (isFinite(va) && isFinite(vb)) {
+        const ratio = Math.max(va, vb) / Math.min(va, vb);
+        const winner = vb < va ? B.label : A.label;
+        faster = `${ratio.toFixed(2)}× <span class="sub">(${esc(winner)})</span>`;
+      }
+      html += '<tr>';
+      html += `<td class="label">${esc(c.label)}</td>`;
+      html += `<td class="num">${isFinite(va)?num(va,2):'–'}</td>`;
+      html += `<td class="num">${isFinite(vb)?num(vb,2):'–'}</td>`;
+      html += `<td class="num">${faster||'–'}</td>`;
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+  }
+
+  // Per-set details (collapsible) with quality info
+  html += '<h2>Per-run details</h2>';
+  for (const s of sets) {
+    const cfg = s.data.config || {};
+    html += `<details><summary><span class="swatch" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${s.color};margin-right:6px;vertical-align:middle"></span><strong>${esc(s.label)}</strong> — ${esc(s.data.platform || '')} — ${(s.data.combos || []).length} combos</summary>`;
+    html += `<div class="meta" style="margin-top:0.6rem">timestamp: ${esc(s.data.timestamp || '')} · iters: ${esc(cfg.iterations)} (warmup ${esc(cfg.warmup)})</div>`;
+    html += `<details style="margin-top:0.4rem"><summary>Show prompt</summary><pre>${esc(cfg.prompt || '')}</pre></details>`;
+    html += '</details>';
+  }
+
+  report.innerHTML = html;
 }
 
 function render(data) {

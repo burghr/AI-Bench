@@ -119,6 +119,12 @@ AGENTS["myagent"] = {
 
 Then add `"myagent"` to `agents` in the config. The matrix expansion picks it up automatically.
 
+## Troubleshooting
+
+- **pi hangs forever on the first run, with low CPU usage.** Some pi extensions hold stdout open and prevent the process from exiting after `-p` mode finishes. Run `pi list` to see installed extensions, then `pi remove <name>` for any non-default ones, and re-run.
+- **`pi --list-models` shows no `ollama/...` entries.** Pi's ollama integration extension isn't installed yet. Run `ollama launch pi --model gemma4 --yes -- --list-models` once — it'll install/update `@ollama/pi-coding-agent` and register the local ollama models. After it exits, plain `pi --list-models` should show them.
+- **LM Studio model not found.** LM Studio's API model IDs depend on what's actually loaded — they don't always match HuggingFace paths. Run `curl -s http://127.0.0.1:1234/v1/models` to see exact IDs the API accepts, then update `lmstudio` aliases in `bench.config.json` to match.
+
 ## Notes from real-world testing
 
 Findings while building this. The benchmark exists partly *to* surface these:
