@@ -48,6 +48,9 @@ IS_ARM64 = platform.machine() in ("arm64", "aarch64")
 # LM Studio on Mac requires Apple Silicon. On Linux it's AppImage-only.
 LMSTUDIO_SUPPORTED = IS_MAC and IS_ARM64
 
+# oMLX requires Apple Silicon
+OMLX_SUPPORTED = IS_MAC and IS_ARM64
+
 
 def log(msg, prefix="•"):
     print(f"{prefix} {msg}", flush=True)
@@ -186,6 +189,20 @@ def have_lmstudio():
     return False
 
 
+def have_omlx():
+    """Check if oMLX is available (supports OpenAI-compatible API)."""
+    if not OMLX_SUPPORTED:
+        return False
+    if which("omlx"):
+        return True
+    # Check if oMLX server is running
+    try:
+        urllib.request.urlopen("http://localhost:8000/v1/models", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
 def have_ollama_model(name):
     if not have_ollama():
         return False
@@ -208,6 +225,33 @@ def have_lmstudio_model(name):
     if rc != 0:
         return False
     return name.split(":")[0].lower() in out.lower()
+
+
+def have_omlx_model(name):
+    """Check if oMLX model is available.
+    oMLX uses local model files, so we check if the model file exists.
+    For now, we just return True if oMLX is installed and running."""
+    if not have_omlx():
+        return False
+    # Get API key dynamically
+    api_key = OMLX.get_api_key()
+    if not api_key:
+        warn("oMLX API key not found. Set OMLX_API_KEY environment variable or check ~/.omlx/settings.json")
+        return False
+    # Check if the oMLX server is running and has models
+    try:
+        req = urllib.request.Request(
+            "http://localhost:8000/v1/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as r:
+            models = json.loads(r.read().decode())
+        # Check if our model is in the list
+        model_ids = [m.get("id", "") for m in models.get("data", [])]
+        base = name.split(":")[0]
+        return any(base in mid for mid in model_ids)
+    except Exception:
+        return False
 
 
 # ---- install ---------------------------------------------------------------
@@ -246,6 +290,21 @@ def install_lmstudio(state):
     state["installed_by_us"]["lmstudio"] = True
 
 
+def install_omlx(state):
+    if have_omlx():
+        return
+    if not OMLX_SUPPORTED:
+        warn("oMLX requires Apple Silicon — skipping.")
+        return
+    if not which("brew"):
+        warn("Homebrew required to auto-install oMLX — skipping.")
+        return
+    log("Installing oMLX…")
+    # oMLX is installed via pip
+    run("pip install omlx", check=False)
+    state["installed_by_us"]["omlx"] = True
+
+
 def install_pi(state):
     if have_pi():
         return
@@ -272,7 +331,7 @@ class Ollama:
     @staticmethod
     def is_up():
         try:
-            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
+            urllib.request.urlopen("http://localhost:11434/api/health", timeout=2)
             return True
         except Exception:
             return False
@@ -327,6 +386,70 @@ class LMStudio:
                 return
             time.sleep(0.5)
         warn("LM Studio server didn't come up in time.")
+
+
+class OMLX:
+    proc = None
+
+    @staticmethod
+    def get_api_key():
+        """Get oMLX API key from config file or environment variable."""
+        import os
+        # First check environment variable
+        if os.environ.get("OMLX_API_KEY"):
+            return os.environ["OMLX_API_KEY"]
+        
+        # Then try to read from oMLX settings file
+        import json
+        home = os.path.expanduser("~")
+        settings_path = os.path.join(home, ".omlx", "settings.json")
+        
+        try:
+            with open(settings_path, "r") as f:
+                settings = json.load(f)
+                return settings.get("auth", {}).get("api_key", "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def is_up():
+        try:
+            # Check with a simple request to /health to avoid auth issues
+            urllib.request.urlopen("http://localhost:8000/health", timeout=2)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def start(cls):
+        if cls.is_up():
+            return
+        if not which("omlx"):
+            warn("`omlx` CLI not found — start oMLX server manually if you want oMLX combos.")
+            return
+        log("Starting oMLX server…")
+        # oMLX server loads models from configured directories
+        # We don't specify --model here because oMLX loads models from config
+        cls.proc = subprocess.Popen(
+            ["omlx", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(40):
+            if cls.is_up():
+                return
+            time.sleep(0.5)
+        warn("oMLX server didn't come up in time.")
+
+    @classmethod
+    def stop(cls):
+        if cls.proc:
+            cls.proc.terminate()
+            try:
+                cls.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.proc.kill()
+            cls.proc = None
 
 
 # ---- agent invocation ------------------------------------------------------
@@ -421,7 +544,7 @@ def restore_opencode_notools_agent():
         OPENCODE_NOTOOLS_AGENT.unlink()
 
 
-def write_opencode_config(ollama_models, lmstudio_models):
+def write_opencode_config(ollama_models, lmstudio_models, omlx_models):
     """Write opencode provider config registering all model aliases per backend."""
     OPENCODE_CFG.parent.mkdir(parents=True, exist_ok=True)
     if OPENCODE_CFG.exists() and not OPENCODE_CFG_BAK.exists():
@@ -441,6 +564,13 @@ def write_opencode_config(ollama_models, lmstudio_models):
             "options": {"baseURL": "http://127.0.0.1:1234/v1"},
             "models": {m: {"name": m} for m in lmstudio_models},
         }
+    if omlx_models:
+        providers["omlx"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "oMLX",
+            "options": {"baseURL": "http://localhost:8000/v1"},
+            "models": {m: {"name": m} for m in omlx_models},
+        }
     cfg = {"$schema": "https://opencode.ai/config.json", "provider": providers}
     OPENCODE_CFG.write_text(json.dumps(cfg, indent=2))
 
@@ -449,8 +579,8 @@ def write_opencode_config(ollama_models, lmstudio_models):
 # Each agent declares: which backends it supports, and how to build the command
 # given (model_alias, backend, prompt). Returns (cmd_list, extra_env_dict).
 def _pi_cmd(model_alias, backend, prompt):
-    # pi has a built-in 'ollama' provider. For other OpenAI-compatible
-    # backends we point pi at a custom URL via env vars and use 'openai/<model>'.
+    # pi has built-in providers for ollama, lmstudio, and omlx
+    # For omlx we use the built-in provider (not openai/<model>)
     if backend == "ollama":
         return (
             ["pi", "-nt", "-p", "--model", f"ollama/{model_alias}", prompt],
@@ -460,6 +590,12 @@ def _pi_cmd(model_alias, backend, prompt):
         return (
             ["pi", "-nt", "-p", "--model", f"openai/{model_alias}", prompt],
             {"OPENAI_BASE_URL": "http://127.0.0.1:1234/v1", "OPENAI_API_KEY": "sk-local"},
+        )
+    elif backend == "omlx":
+        # pi has a built-in omlx provider for local oMLX server
+        return (
+            ["pi", "-nt", "-p", "--model", f"omlx/{model_alias}", prompt],
+            {},
         )
     raise ValueError(f"pi: unsupported backend {backend}")
 
@@ -477,12 +613,12 @@ def _opencode_cmd(model_alias, backend, prompt):
 
 AGENTS = {
     "pi": {
-        "supports_backends": ["ollama", "lmstudio"],
+        "supports_backends": ["ollama", "lmstudio", "omlx"],
         "build_cmd": _pi_cmd,
         "is_installed": lambda: bool(which("pi")),
     },
     "opencode": {
-        "supports_backends": ["ollama", "lmstudio"],
+        "supports_backends": ["ollama", "lmstudio", "omlx"],
         "build_cmd": _opencode_cmd,
         "is_installed": lambda: bool(which("opencode")),
     },
@@ -678,6 +814,7 @@ def cleanup(state, cfg):
         if which("lms"):
             run(["lms", "rm", name, "-y"], check=False)
     Ollama.stop()
+    OMLX.stop()
     if inst.get("pi"):
         if which("npm"):
             run("npm uninstall -g @mariozechner/pi-coding-agent", check=False)
@@ -687,6 +824,8 @@ def cleanup(state, cfg):
         run("brew uninstall ollama", check=False)
     if inst.get("lmstudio") and IS_MAC and which("brew"):
         run("brew uninstall --cask lm-studio", check=False)
+    if inst.get("omlx"):
+        run("pip uninstall -y omlx", check=False)
     STATE_FILE.unlink(missing_ok=True)
     log("Cleanup complete.")
 
@@ -726,11 +865,14 @@ def main():
         "agents":   {a: AGENTS[a]["is_installed"]() for a in requested_agents},
         "backends": {b: (have_ollama() if b == "ollama"
                           else have_lmstudio() if b == "lmstudio"
+                          else have_omlx() if b == "omlx"
                           else False) for b in requested_backends},
         "ollama_models":   {m["id"]: have_ollama_model(m["ollama"])
                              for m in models if "ollama" in m},
         "lmstudio_models": {m["id"]: have_lmstudio_model(m["lmstudio"])
                              for m in models if "lmstudio" in m},
+        "omlx_models":     {m["id"]: have_omlx_model(m["omlx"]) if "omlx" in m else False
+                             for m in models},
     }
     state["pre_existing"] = pre
     save_state(state)
@@ -741,6 +883,8 @@ def main():
             install_ollama(state); save_state(state)
         if "lmstudio" in requested_backends:
             install_lmstudio(state); save_state(state)
+        if "omlx" in requested_backends:
+            install_omlx(state); save_state(state)
         if "pi" in requested_agents:
             install_pi(state); save_state(state)
         if "opencode" in requested_agents:
@@ -750,6 +894,8 @@ def main():
         Ollama.start()
     if "lmstudio" in requested_backends and have_lmstudio():
         LMStudio.start()
+    if "omlx" in requested_backends and have_omlx():
+        OMLX.start()
 
     # Pull each requested model from each requested backend.
     for m in models:
@@ -772,6 +918,10 @@ def main():
                     save_state(state)
                 else:
                     warn(f"`lms get {m['lmstudio']}` failed — load it manually in LM Studio.")
+        if "omlx" in requested_backends and "omlx" in m and have_omlx():
+            # oMLX models are typically served locally, so we don't pull them
+            # just check if the model file exists or log a warning
+            log(f"Using oMLX model '{m['omlx']}' (ensure model file is available locally)")
 
     if "lmstudio" in requested_backends and have_lmstudio() and which("lms"):
         for m in models:
@@ -783,6 +933,7 @@ def main():
         write_opencode_config(
             ollama_models=[m["ollama"] for m in models if "ollama" in m] if "ollama" in requested_backends else [],
             lmstudio_models=[m["lmstudio"] for m in models if "lmstudio" in m] if "lmstudio" in requested_backends else [],
+            omlx_models=[m["omlx"] for m in models if "omlx" in m] if "omlx" in requested_backends else [],
         )
         write_opencode_notools_agent()
 

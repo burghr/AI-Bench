@@ -2,6 +2,11 @@
 
 End-to-end benchmark harness for **local AI coding agents** running against **local LLM backends**.
 
+Currently supported backends:
+- **Ollama** - Run local LLMs with a single command
+- **LM Studio** - GUI-based local LLM server
+- **oMLX** - Apple Silicon-optimized ML inference (MLX-based)
+
 For any matrix of `agents × backends × models`, `bench.py` runs the same prompt N times per combination, captures wall time, time-to-first-token, output tokens, and the raw model output, then writes a `results.json` and a per-iteration text file you can open to verify the model actually did the task.
 
 A standalone `viewer.html` reads any `results.json` and renders a sortable, color-coded report with column tooltips and bar charts.
@@ -25,10 +30,11 @@ Each iteration's full stdout is saved to disk so you can open the generated arti
 
 ## Requirements
 
-- macOS (primary) or Linux (Ollama-only; LM Studio install is not automated on Linux).
+- macOS (primary) or Linux (Ollama-only; LM Studio and oMLX require Apple Silicon).
 - Python 3.9+.
 - Internet access for first-time agent/model downloads (subsequent runs work offline).
 - LM Studio support requires Apple Silicon — the script auto-detects and skips on Intel.
+- oMLX support requires Apple Silicon — the script auto-detects and skips on Intel.
 
 The script will offer to install missing pieces (`pi`, `opencode`, `ollama`, LM Studio via Homebrew) and pull missing models. At the end it asks whether to uninstall everything it added.
 
@@ -58,6 +64,26 @@ Uninstall apps and pulled models that the script added:
 python3 bench.py --cleanup-only
 ```
 
+### oMLX API Key Configuration
+
+When using oMLX, the benchmark harness reads the API key from one of two sources:
+
+1. **Environment variable**: Set `OMLX_API_KEY` before running the benchmark
+   ```bash
+   OMLX_API_KEY="your-api-key" python3 bench.py
+   ```
+
+2. **oMLX settings file**: The default location is `~/.omlx/settings.json`
+   ```json
+   {
+     "auth": {
+       "api_key": "your-api-key"
+     }
+   }
+   ```
+
+The benchmark will automatically read the API key from whichever source is available. If no API key is found, the benchmark will fail for oMLX backends.
+
 ## Configuration
 
 Everything lives in `bench.config.json`:
@@ -65,11 +91,11 @@ Everything lives in `bench.config.json`:
 ```json
 {
   "models": [
-    { "id": "qwen3-1.7b", "ollama": "qwen3:1.7b", "lmstudio": "qwen/qwen3-1.7b" },
-    { "id": "gemma4",     "ollama": "gemma4",     "lmstudio": "google/gemma-4-it" }
+    { "id": "qwen3-1.7b", "ollama": "qwen3:1.7b", "lmstudio": "qwen/qwen3-1.7b", "omlx": "Qwen/Qwen2-1.5B" },
+    { "id": "gemma4",     "ollama": "gemma4",     "lmstudio": "google/gemma-4-it",     "omlx": "google/gemma-4-it" }
   ],
   "agents":   ["pi", "opencode"],
-  "backends": ["ollama", "lmstudio"],
+  "backends": ["ollama", "lmstudio", "omlx"],
   "iterations": 3,
   "warmup": 1,
   "prompt": "Build a single-page website..."
@@ -78,9 +104,9 @@ Everything lives in `bench.config.json`:
 
 | field | meaning |
 |---|---|
-| `models` | List of models to test. Each entry has a human-readable `id` and per-backend aliases (since Ollama and LM Studio name the same model differently). A model is skipped for backends it has no alias for. |
+| `models` | List of models to test. Each entry has a human-readable `id` and per-backend aliases (since Ollama, LM Studio, and oMLX name the same model differently). A model is skipped for backends it has no alias for. |
 | `agents` | Which agents to invoke. `pi`, `opencode`, and `direct` are built-in. `direct` is a pseudo-agent that calls the backend's HTTP API directly — used to capture the model's *real* tokens-per-second from the backend's own counters (no agent overhead). |
-| `backends` | Which local LLM servers to use. Currently `ollama` and `lmstudio`. |
+| `backends` | Which local LLM servers to use. Currently `ollama`, `lmstudio`, and `omlx`. |
 | `iterations` | Timed runs per combination. |
 | `warmup` | Untimed runs per combination, executed first. Hides cold model-load latency from the timed numbers. |
 | `prompt` | What to send to every run. Change this to benchmark different use cases (HTML, C++, refactor tasks, etc.). One prompt per run; change between runs as needed. |
@@ -128,6 +154,7 @@ Then add `"myagent"` to `agents` in the config. The matrix expansion picks it up
 - **pi hangs forever on the first run, with low CPU usage.** Some pi extensions hold stdout open and prevent the process from exiting after `-p` mode finishes. Run `pi list` to see installed extensions, then `pi remove <name>` for any non-default ones, and re-run.
 - **`pi --list-models` shows no `ollama/...` entries.** Pi's ollama integration extension isn't installed yet. Run `ollama launch pi --model gemma4 --yes -- --list-models` once — it'll install/update `@ollama/pi-coding-agent` and register the local ollama models. After it exits, plain `pi --list-models` should show them.
 - **LM Studio model not found.** LM Studio's API model IDs depend on what's actually loaded — they don't always match HuggingFace paths. Run `curl -s http://127.0.0.1:1234/v1/models` to see exact IDs the API accepts, then update `lmstudio` aliases in `bench.config.json` to match.
+- **oMLX model not found.** oMLX uses local model files. Ensure your model file is available before starting the server. Run `curl -s http://localhost:8000/v1/models` to verify models are loaded, then update `omlx` aliases in `bench.config.json` to match.
 
 ## Notes from real-world testing
 
