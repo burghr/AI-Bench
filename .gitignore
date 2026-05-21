@@ -1,3 +1,4 @@
+.env
 .bench-state.json
 results/
 *.log
