@@ -42,7 +42,7 @@ These must be present before running `bench.py`. The script does **not** install
 
 ## What the script installs
 
-`bench.py` auto-installs the following and tracks them in `.bench-state.json`. Running `python3 bench.py --cleanup-only` removes everything in this list.
+`bench.py` auto-installs the following and tracks them in `.bench-state.json`. Running `python3 bench.py --cleanup-only` removes everything **this script installed or downloaded** — anything you had set up beforehand (Ollama already present, models you pulled by hand, etc.) is left alone.
 
 | Tool | How installed |
 |---|---|

@@ -1,17 +1,14 @@
 {
   "models": [
     {
-      "id": "qwen3:1.7b",
+      "id": "qwen3-1.7b",
       "ollama": "qwen3:1.7b"
     },
     {
-      "id": "qwen3-1.7b",
-      "lmstudio": "qwen/qwen3-1.7b"
-    },
-    {
-      "id": "qwen3-coder-30b-a3b-instruct-mlx-4bit",
-      "omlx": "Qwen3-Coder-30B-A3B-Instruct-MLX-4bit",
-      "omlx_hf": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit"
+      "id": "qwen3-coder-next",
+      "lmstudio": "lmstudio-community/Qwen3-Coder-Next-MLX-4bit",
+      "omlx": "Qwen3-Coder-Next-MLX-4bit",
+      "omlx_hf": "lmstudio-community/Qwen3-Coder-Next-MLX-4bit"
     }
   ],
   "agents": [
@@ -22,7 +19,7 @@
     "lmstudio",
     "omlx"
   ],
-  "iterations": 1,
+  "iterations": 3,
   "warmup": 1,
   "prompt": "Build a single-page website in plain HTML, CSS, and JavaScript with two buttons. The first button fetches a random joke from https://icanhazdadjoke.com/ (send header 'Accept: application/json') and displays it on the page. The second button toggles dark mode by adding/removing a 'dark' CSS class on the body, with appropriate styles for both modes. Output a single complete HTML file with inline <style> and <script> tags. No build tools, no frameworks. Output only the HTML, no commentary. Ask no questions and make any required assumptions yourself."
 }

@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import platform
+import select
 import shutil
 import subprocess
 import sys
@@ -217,31 +218,83 @@ def have_omlx():
 
 
 def have_ollama_model(name):
-    if not have_ollama():
+    # Read manifest directly so this works pre-flight (before the server is up)
+    # and matches what _list_ollama_installed() reports.
+    manifests_root = Path.home() / ".ollama" / "models" / "manifests" / "registry.ollama.ai" / "library"
+    if ":" in name:
+        family, tag = name.split(":", 1)
+    else:
+        family, tag = name, "latest"
+    return (manifests_root / family / tag).exists()
+
+
+def _lmstudio_dir_complete(d):
+    """Return True only if a model dir is FULLY downloaded — no .part files
+    and at least one .safetensors / .gguf weight file present."""
+    if not d.is_dir():
         return False
-    rc, out, _ = run(["ollama", "list"], capture=True, check=False)
-    if rc != 0:
+    files = list(d.iterdir())
+    if not files:
         return False
-    base = name.split(":")[0]
-    for line in out.splitlines()[1:]:
-        if not line.strip():
-            continue
-        if line.split()[0].split(":")[0] == base:
-            return True
-    return False
+    if any(f.name.startswith("downloading_") or f.name.endswith(".part") for f in files):
+        return False
+    has_weights = any(
+        f.suffix in (".safetensors", ".gguf") and not f.name.startswith("downloading_")
+        for f in files
+    )
+    return has_weights
 
 
 def have_lmstudio_model(name):
-    if not which("lms"):
+    # Filesystem check is the ground truth: LM Studio's `lms ls` renames models
+    # (strips publisher + quant suffix) so substring matching there is unreliable.
+    # The download lives under ~/.lmstudio/models/<hf_path>/ regardless. We
+    # treat partial downloads (any `.part` file present) as NOT present, so the
+    # bench doesn't try to load a half-finished model.
+    if not name:
         return False
-    rc, out, _ = run(["lms", "ls"], capture=True, check=False)
-    if rc != 0:
-        return False
-    out_lower = out.lower()
-    # Match on full name or just the filename component (last path segment).
-    base = name.split(":")[0].lower()
-    filename = base.split("/")[-1]
-    return base in out_lower or filename in out_lower
+    path = name
+    if path.startswith("http"):
+        path = path.rstrip("/").split("huggingface.co/")[-1]
+    lms_root = Path.home() / ".lmstudio" / "models"
+    candidate = lms_root / path
+    if _lmstudio_dir_complete(candidate):
+        return True
+    if lms_root.exists():
+        target = path.split("/")[-1].lower()
+        for d in lms_root.rglob("*"):
+            if d.is_dir() and d.name.lower() == target and _lmstudio_dir_complete(d):
+                return True
+    return False
+
+
+def _lmstudio_resolve_api_id(hf_path):
+    """Return LM Studio's API model ID for an HF repo path, or None.
+
+    LM Studio assigns a shorter alias (e.g. `qwen3-coder-next-mlx` for
+    `lmstudio-community/Qwen3-Coder-Next-MLX-4bit`). Both `lms load` and the
+    OpenAI-compatible /v1/* endpoints want that alias, not the HF path.
+    """
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:1234/v1/models", timeout=5) as r:
+            data = json.loads(r.read())
+        ids = [m.get("id", "") for m in (data.get("data") or []) if m.get("id")]
+    except Exception:
+        return None
+    if not ids:
+        return None
+    target = hf_path.split("/")[-1].lower()
+    for api_id in ids:
+        if api_id.lower() == target:
+            return api_id
+    for api_id in ids:
+        api_lower = api_id.lower()
+        if target.startswith(api_lower) or api_lower.startswith(target):
+            return api_id
+    for api_id in ids:
+        if api_id.lower() in target or target in api_id.lower():
+            return api_id
+    return None
 
 
 def have_omlx_model(name):
@@ -490,6 +543,40 @@ class LMStudio:
         except Exception:
             return False
 
+    SETTINGS_PATH = Path.home() / ".lmstudio" / "settings.json"
+    SETTINGS_BAK  = SETTINGS_PATH.with_suffix(".json.bench-bak")
+
+    @classmethod
+    def relax_guardrails(cls):
+        """Disable LM Studio's model-load resource guardrail for this run.
+
+        The default guardrail over-estimates MoE / large-context models' memory
+        needs (e.g. claims ~58 GiB for a 44 GB MLX-4bit Qwen MoE on a 64 GB
+        machine where it actually runs fine). Backs up the original settings so
+        cls.restore_guardrails() can put them back at end-of-run.
+        """
+        if not cls.SETTINGS_PATH.exists():
+            return
+        try:
+            settings = json.loads(cls.SETTINGS_PATH.read_text())
+        except Exception:
+            return
+        g = settings.get("modelLoadingGuardrails") or {}
+        if g.get("mode") == "off" and g.get("alwaysAllowLoadAnyway") is True:
+            return  # already relaxed
+        if not cls.SETTINGS_BAK.exists():
+            shutil.copy(cls.SETTINGS_PATH, cls.SETTINGS_BAK)
+        g["mode"] = "off"
+        g["alwaysAllowLoadAnyway"] = True
+        settings["modelLoadingGuardrails"] = g
+        cls.SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+        log("Relaxed LM Studio model-load guardrails (will restore at end of run).")
+
+    @classmethod
+    def restore_guardrails(cls):
+        if cls.SETTINGS_BAK.exists():
+            shutil.move(str(cls.SETTINGS_BAK), str(cls.SETTINGS_PATH))
+
     @classmethod
     def _ensure_daemon(cls):
         """LM Studio app must launch at least once to unpack its daemon.
@@ -515,6 +602,8 @@ class LMStudio:
             if daemon_dir.exists():
                 break
             time.sleep(0.5)
+        else:
+            warn(f"LM Studio daemon dir ({daemon_dir}) didn't appear after 30 s — `lms bootstrap` may fail.")
         time.sleep(2)
         run(["osascript", "-e", 'quit app "LM Studio"'], check=False)
         time.sleep(2)
@@ -554,20 +643,12 @@ class OMLX:
     @staticmethod
     def get_api_key():
         """Get oMLX API key from config file or environment variable."""
-        import os
-        # First check environment variable
         if os.environ.get("OMLX_API_KEY"):
             return os.environ["OMLX_API_KEY"]
-        
-        # Then try to read from oMLX settings file
-        import json
-        home = os.path.expanduser("~")
-        settings_path = os.path.join(home, ".omlx", "settings.json")
-        
+        settings_path = Path.home() / ".omlx" / "settings.json"
         try:
-            with open(settings_path, "r") as f:
-                settings = json.load(f)
-                return settings.get("auth", {}).get("api_key", "")
+            settings = json.loads(settings_path.read_text())
+            return settings.get("auth", {}).get("api_key", "")
         except Exception:
             return ""
 
@@ -582,9 +663,14 @@ class OMLX:
 
     @classmethod
     def start(cls):
-        # Always stop any pre-existing server so it restarts pointing at the
-        # current model-dir (a stale server may have started before models downloaded).
+        # If we already own a running server, stop it so it restarts pointing at
+        # the current model-dir (a stale server may have started before models
+        # downloaded). If something *else* holds the port, trust it — we can't
+        # safely kill it, and trying to start a duplicate would fail to bind.
         if cls.is_up():
+            if cls.proc is None:
+                log("oMLX server already running (not started by us) — using existing instance.")
+                return
             cls.stop()
             time.sleep(1)
         omlx_bin = str(OMLX_BIN) if OMLX_BIN.exists() else which("omlx")
@@ -617,7 +703,14 @@ class OMLX:
 
 # ---- agent invocation ------------------------------------------------------
 def run_agent_streamed(cmd, env, *, total_timeout=900):
-    """Spawn agent, stream stdout, time first→last byte and total wall."""
+    """Spawn agent, stream stdout, time first→last byte and total wall.
+
+    Stderr is drained on a background thread so it can't deadlock when the
+    agent writes more than the pipe buffer (~64 KB on macOS) before we
+    finish reading stdout. Stdout is byte-by-byte until we see the first
+    non-whitespace character (to pin TTFT precisely) then chunked, which
+    avoids one syscall per byte contaminating wall-time on chatty agents.
+    """
     p = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -630,31 +723,56 @@ def run_agent_streamed(cmd, env, *, total_timeout=900):
     first_byte_t = None
     last_byte_t = None
     chunks = []
+
+    stderr_chunks = []
+    def _drain_stderr():
+        try:
+            while True:
+                chunk = p.stderr.read(4096)
+                if not chunk:
+                    break
+                stderr_chunks.append(chunk)
+        except Exception:
+            pass
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     try:
         while True:
-            ch = p.stdout.read(1)
-            if not ch:
-                break
             now = time.monotonic()
-            if first_byte_t is None and ch.strip():
-                first_byte_t = now
-            last_byte_t = now
-            chunks.append(ch)
             if now - start > total_timeout:
                 p.kill()
                 break
+            rlist, _, _ = select.select([p.stdout], [], [], 1.0)
+            if not rlist:
+                if p.poll() is not None:
+                    break
+                continue
+            if first_byte_t is None:
+                ch = p.stdout.read(1)
+                if not ch:
+                    break
+                now = time.monotonic()
+                if ch.strip():
+                    first_byte_t = now
+                last_byte_t = now
+                chunks.append(ch)
+            else:
+                chunk = p.stdout.read(4096)
+                if not chunk:
+                    break
+                last_byte_t = time.monotonic()
+                chunks.append(chunk)
     finally:
         try:
             p.wait(timeout=10)
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait(timeout=5)
+        stderr_thread.join(timeout=5)
     end = time.monotonic()
     out = b"".join(chunks).decode("utf-8", errors="replace")
-    try:
-        err_out = (p.stderr.read() or b"").decode("utf-8", errors="replace")
-    except Exception:
-        err_out = ""
+    err_out = b"".join(stderr_chunks).decode("utf-8", errors="replace")
     return {
         "rc": p.returncode,
         "wall_s": end - start,
@@ -667,6 +785,8 @@ def run_agent_streamed(cmd, env, *, total_timeout=900):
 
 
 def estimate_tokens(text):
+    if not text:
+        return 0
     return max(1, round(len(text) / 4))
 
 
@@ -960,6 +1080,7 @@ def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None,
             continue
         tokens = estimate_tokens(result["stdout"])
         wall_s = max(result["wall_s"], 1e-6)
+        throughput = round(tokens / wall_s, 2) if tokens else 0.0
         streamed = bool(
             result["ttft_s"] is not None
             and result.get("last_byte_s") is not None
@@ -972,7 +1093,7 @@ def bench_one(label, cmd, env, run_dir, n_iter, warmup, progress=None,
             "ttft_s": round(result["ttft_s"], 3) if result["ttft_s"] else None,
             "output_chars": len(result["stdout"]),
             "output_tokens_est": tokens,
-            "throughput_tok_per_s_est": round(tokens / wall_s, 2),
+            "throughput_tok_per_s_est": throughput,
             "streamed": streamed,
             "rc": result["rc"],
             "output_file": out_path.name,
@@ -1018,6 +1139,7 @@ def cleanup(state, cfg):
     restore_pi_models_config()
     restore_opencode_config()
     restore_opencode_notools_agent()
+    LMStudio.restore_guardrails()
     inst = state.get("installed_by_us", {})
     pulled = state.get("model_pulled_by_us", {})
 
@@ -1061,11 +1183,11 @@ def cleanup(state, cfg):
     if inst.get("pi"):
         if which("npm"):
             run("npm uninstall -g @mariozechner/pi-coding-agent", check=False)
+        shutil.rmtree(Path.home() / ".pi", ignore_errors=True)
     if inst.get("opencode"):
         if which("opencode"):
             run(["opencode", "uninstall"], check=False)
-        elif (Path.home() / ".opencode").exists():
-            shutil.rmtree(Path.home() / ".opencode", ignore_errors=True)
+        shutil.rmtree(Path.home() / ".opencode", ignore_errors=True)
     if inst.get("ollama") and IS_MAC and which("brew"):
         run("brew uninstall ollama", check=False)
         shutil.rmtree(Path.home() / ".ollama", ignore_errors=True)
@@ -1077,6 +1199,7 @@ def cleanup(state, cfg):
             shutil.rmtree(OMLX_VENV_DIR, ignore_errors=True)
         if OMLX_CLONE_DIR.exists():
             shutil.rmtree(OMLX_CLONE_DIR, ignore_errors=True)
+        shutil.rmtree(Path.home() / ".omlx", ignore_errors=True)
     STATE_FILE.unlink(missing_ok=True)
     log("Cleanup complete.")
 
@@ -1099,6 +1222,31 @@ def _fmt_size(size_bytes):
         return ""
     gb = size_bytes / 1e9
     return f"{gb:.1f} GB" if gb >= 1 else f"{size_bytes / 1e6:.0f} MB"
+
+
+# Strip vendor prefix, lowercase, normalise separators, and drop common
+# quant/format suffixes so the same model picked from different backends
+# (e.g. ollama "qwen3:1.7b", lmstudio "qwen/qwen3-1.7b") lands on the same
+# label and gets grouped side-by-side in the viewer.
+_LABEL_SUFFIXES = (
+    "-mlx-bf16", "-mlx-4bit", "-mlx-8bit", "-mlx",
+    "-gguf", "-q4_k_m", "-q4_k_s", "-q5_k_m", "-q5_k_s", "-q8_0",
+    "-4bit", "-8bit", "-bf16", "-fp16",
+)
+
+
+def _normalize_label(model_id):
+    s = model_id.split("/")[-1].lower()
+    for sep in (":", "_", " "):
+        s = s.replace(sep, "-")
+    changed = True
+    while changed:
+        changed = False
+        for suf in _LABEL_SUFFIXES:
+            if s.endswith(suf):
+                s = s[: -len(suf)]
+                changed = True
+    return s
 
 
 def _list_ollama_installed():
@@ -1130,19 +1278,20 @@ def _list_ollama_installed():
 
 
 def _search_ollama(term):
-    """Search Ollama: scrape the library page for all model variants, and use the
-    trending API to fill in sizes where available."""
-    import urllib.parse, re, concurrent.futures
+    """Search Ollama by scraping the library page for all tag variants + sizes.
 
-    # Normalise: "qwen3 1.7b" → try families ["qwen3"] with tag filter "1.7"
-    parts = term.lower().split()
-    family = parts[0].replace("_", "-")  # first word is the model family
-    tag_filter = parts[1] if len(parts) > 1 else ""  # rest narrows down tags
+    Heuristic: the first whitespace-separated word is the family slug. Try it
+    verbatim first; if that returns nothing and the term has multiple words,
+    retry with the first two words concatenated (handles "llama 3" → "llama3").
+    Any remaining words are treated as a substring filter on the tag.
+    """
+    import re
 
-    sizes = {}  # name -> formatted size string (from trending API)
+    parts = term.lower().strip().replace("_", "-").split()
+    if not parts:
+        return []
 
-    def _fetch_library_page():
-        """Scrape ollama.com/library/<family> for all tag names and their sizes."""
+    def _fetch(family, tag_filter=""):
         try:
             req = urllib.request.Request(
                 f"https://ollama.com/library/{family}",
@@ -1157,25 +1306,23 @@ def _search_ollama(term):
                 tag = m.group(0)
                 if tag in seen:
                     continue
-                # Look for a size value in the next 400 chars after the tag
                 ctx = html[m.start(): m.start() + 400]
                 sm = size_pat.search(ctx)
                 seen[tag] = f"{sm.group(1)} {sm.group(2)}" if sm else ""
-            return seen  # {tag: size_str}
+            tags = sorted(seen.keys())
+            if tag_filter:
+                tags = [t for t in tags if tag_filter in t.lower()]
+            return [{"id": t, "size": seen.get(t, "")} for t in tags]
         except Exception:
-            return {}
+            return []
 
-    tag_sizes = _fetch_library_page()          # {tag: size_str}
-    tags = sorted(tag_sizes.keys())
-
-    # Filter by optional second word (e.g. "1.7" when searching "qwen3 1.7b")
-    if tag_filter:
-        tags = [t for t in tags if tag_filter in t.lower()]
-
-    if not tags:
-        return []
-
-    return [{"id": t, "size": tag_sizes.get(t, "")} for t in tags]
+    first_results = _fetch(parts[0], " ".join(parts[1:]))
+    if first_results:
+        return first_results
+    if len(parts) >= 2:
+        joined = parts[0] + parts[1]
+        return _fetch(joined, " ".join(parts[2:]))
+    return []
 
 
 def _list_lmstudio_installed():
@@ -1207,8 +1354,8 @@ def _list_lmstudio_installed():
         return []
 
 
-def _hf_fetch_size(hf_id):
-    """Return usedStorage bytes for a single HuggingFace repo, or 0 on failure."""
+def _hf_fetch_model_info(hf_id):
+    """Fetch the full HuggingFace model API payload, or {} on failure."""
     headers = {"User-Agent": "agent-bench/1.0"}
     token = os.environ.get("HF_TOKEN", "")
     if token:
@@ -1219,9 +1366,14 @@ def _hf_fetch_size(hf_id):
             headers=headers,
         )
         with urllib.request.urlopen(req, timeout=4) as r:
-            return json.loads(r.read()).get("usedStorage") or 0
+            return json.loads(r.read()) or {}
     except Exception:
-        return 0
+        return {}
+
+
+def _hf_fetch_size(hf_id):
+    """Return usedStorage bytes for a single HuggingFace repo, or 0 on failure."""
+    return _hf_fetch_model_info(hf_id).get("usedStorage") or 0
 
 
 def _hf_fill_sizes(results, id_key="id"):
@@ -1235,21 +1387,67 @@ def _hf_fill_sizes(results, id_key="id"):
 
 
 def _search_lmstudio_online(term):
-    """Search HuggingFace for GGUF models downloadable via lms get."""
+    """Search HuggingFace for models downloadable via `lms get`.
+
+    Searches both GGUF and (on Apple Silicon) MLX repos, since LM Studio
+    supports both formats. Filters out repos that have neither a .gguf nor
+    .safetensors file. `desc` notes the format + file count so the user can
+    tell e.g. a single-file GGUF from a multi-quant repo.
+    """
     try:
-        import urllib.parse
-        params = urllib.parse.urlencode({
-            "search": term, "tags": "gguf",
-            "sort": "downloads", "limit": 12,
-        })
-        req = urllib.request.Request(
-            f"https://huggingface.co/api/models?{params}",
-            headers={"User-Agent": "agent-bench/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as r:
-            items = json.loads(r.read())
-        results = [{"id": m.get("id") or m.get("modelId", ""), "size": ""} for m in items]
-        _hf_fill_sizes(results)
+        import urllib.parse, concurrent.futures
+        tags_to_search = ["gguf"]
+        if LMSTUDIO_SUPPORTED:
+            tags_to_search.append("mlx")
+
+        all_ids = []
+        seen = set()
+        for tag in tags_to_search:
+            params = urllib.parse.urlencode({
+                "search": term, "tags": tag,
+                "sort": "downloads", "limit": 15,
+            })
+            req = urllib.request.Request(
+                f"https://huggingface.co/api/models?{params}",
+                headers={"User-Agent": "agent-bench/1.0"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=6) as r:
+                    items = json.loads(r.read())
+            except Exception:
+                continue
+            for m in items:
+                mid = m.get("id") or m.get("modelId", "")
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    all_ids.append(mid)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            infos = list(pool.map(_hf_fetch_model_info, all_ids))
+        results = []
+        for hf_id, info in zip(all_ids, infos):
+            siblings = info.get("siblings") or []
+            filenames = [(s.get("rfilename") or "").lower() for s in siblings]
+            gguf_count = sum(1 for f in filenames if f.endswith(".gguf"))
+            st_count   = sum(1 for f in filenames if f.endswith(".safetensors"))
+            if gguf_count == 0 and st_count == 0:
+                continue
+            tags = info.get("tags") or []
+            is_mlx = "mlx" in tags or "-mlx-" in hf_id.lower() or hf_id.lower().endswith("-mlx")
+            if gguf_count > 0:
+                desc = f"GGUF · {gguf_count} file{'s' if gguf_count > 1 else ''}"
+            elif is_mlx:
+                desc = "MLX (Apple Silicon)"
+            else:
+                desc = f"safetensors · {st_count} shard{'s' if st_count > 1 else ''}"
+            size_bytes = info.get("usedStorage") or 0
+            results.append({
+                "id": hf_id,
+                "size": _fmt_size(size_bytes),
+                "desc": desc,
+            })
+            if len(results) >= 16:
+                break
         return results
     except Exception:
         return []
@@ -1272,12 +1470,17 @@ def _list_omlx_installed():
 
 
 def _search_hf_mlx(term):
-    """Search HuggingFace mlx-community for MLX safetensors models."""
+    """Search HuggingFace for MLX safetensors models across all publishers.
+
+    Uses the `mlx` tag rather than filtering to a single org so packagers like
+    mlx-community, lmstudio-community, and others all surface. Skips repos
+    with no .safetensors files (mis-tagged or weight-less READMEs).
+    """
     try:
-        import urllib.parse
+        import urllib.parse, concurrent.futures
         params = urllib.parse.urlencode({
-            "search": term, "filter": "mlx-community",
-            "sort": "downloads", "limit": 10,
+            "search": term, "tags": "mlx",
+            "sort": "downloads", "limit": 20,
         })
         req = urllib.request.Request(
             f"https://huggingface.co/api/models?{params}",
@@ -1285,12 +1488,34 @@ def _search_hf_mlx(term):
         )
         with urllib.request.urlopen(req, timeout=6) as r:
             items = json.loads(r.read())
+        hf_ids = [m.get("id") or m.get("modelId", "") for m in items]
+        hf_ids = [h for h in hf_ids if h]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            infos = list(pool.map(_hf_fetch_model_info, hf_ids))
         results = []
-        for m in items:
-            hf_id = m.get("id") or m.get("modelId", "")
-            results.append({"id": hf_id.split("/")[-1], "hf_id": hf_id, "size": ""})
-        _hf_fill_sizes(results, id_key="hf_id")
-        return results[:8]
+        for hf_id, info in zip(hf_ids, infos):
+            siblings = info.get("siblings") or []
+            has_st = any(
+                (s.get("rfilename") or "").lower().endswith(".safetensors")
+                for s in siblings
+            )
+            if not has_st:
+                continue
+            tags = info.get("tags") or []
+            is_mlx = "mlx" in tags or "mlx" in hf_id.lower()
+            if not is_mlx:
+                continue
+            org = hf_id.split("/")[0] if "/" in hf_id else ""
+            size_bytes = info.get("usedStorage") or 0
+            results.append({
+                "id": hf_id.split("/")[-1],
+                "hf_id": hf_id,
+                "size": _fmt_size(size_bytes),
+                "desc": org,
+            })
+            if len(results) >= 12:
+                break
+        return results
     except Exception:
         return []
 
@@ -1437,7 +1662,7 @@ def model_picker(cfg_path, force=False):
         if not items:
             continue
         for item in items:
-            label = item["id"].split("/")[-1].lower().replace(" ", "-")
+            label = _normalize_label(item["id"])
             if label not in model_map:
                 model_map[label] = {"id": label}
             entry = model_map[label]
@@ -1596,43 +1821,84 @@ def main():
             if "ollama" in m and not have_ollama_model(m["ollama"]):
                 log(f"Pulling {m['ollama']} via ollama…")
                 run(["ollama", "pull", m["ollama"]])
-                state["model_pulled_by_us"].setdefault("ollama", []).append(m["ollama"]) \
-                    if isinstance(state["model_pulled_by_us"].get("ollama"), list) \
-                    else state["model_pulled_by_us"].update({"ollama": [m["ollama"]]})
+                state["model_pulled_by_us"].setdefault("ollama", []).append(m["ollama"])
                 save_state(state)
         Ollama.stop()
         time.sleep(2)
 
     # LM Studio pull phase: start server, download missing models, stop.
     if "lmstudio" in requested_backends and have_lmstudio():
+        # Relax model-loading guardrails before the server first reads its
+        # settings — the LM Studio process caches settings.json at startup.
+        LMStudio.relax_guardrails()
         LMStudio.start()
         for m in models:
             if "lmstudio" in m and not have_lmstudio_model(m["lmstudio"]):
-                # lmstudio value is the LM Studio catalog ID (e.g. "qwen/qwen3-1.7b"),
-                # which is also the API model ID the server reports. Same value for both.
-                log(f"Downloading {m['lmstudio']} via lms… (large models may take several minutes)")
-                # Suppress lms's TTY spinner — it floods the log with ANSI escape codes.
-                r = subprocess.run(
-                    ["lms", "get", m["lmstudio"], "-y"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                    text=True, check=False,
-                )
-                rc = r.returncode
-                if rc == 0:
-                    state["model_pulled_by_us"].setdefault("lmstudio", []).append(m["lmstudio"]) \
-                        if isinstance(state["model_pulled_by_us"].get("lmstudio"), list) \
-                        else state["model_pulled_by_us"].update({"lmstudio": [m["lmstudio"]]})
+                alias = m["lmstudio"]
+                # Force the right format when the model name carries one — `lms
+                # get -y` otherwise picks based on hardware/preferences and may
+                # pull a different quant.
+                fmt_flag = []
+                low = alias.lower()
+                if "-mlx" in low or "mlx-" in low:
+                    fmt_flag = ["--mlx"]
+                elif "gguf" in low:
+                    fmt_flag = ["--gguf"]
+
+                # `lms get <org/name>` resolves against the LM Studio catalog
+                # first. For HF repos not in the curated catalog (e.g. brand-new
+                # models), that lookup fails — retry with the full HF URL form.
+                attempts = [alias]
+                if "/" in alias and not alias.startswith("http"):
+                    attempts.append(f"https://huggingface.co/{alias}")
+
+                rc = None
+                last_stderr = ""
+                for target in attempts:
+                    log(f"Downloading {target} via lms… (large models may take several minutes)")
+                    r = subprocess.run(
+                        ["lms", "get", target, "-y", *fmt_flag],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        text=True, check=False,
+                    )
+                    rc = r.returncode
+                    last_stderr = r.stderr or ""
+                    if rc == 0 and have_lmstudio_model(alias):
+                        break
+                    if "does not exist" not in last_stderr and "permission" not in last_stderr:
+                        break  # other failure mode — don't try fallback
+
+                if rc == 0 and have_lmstudio_model(alias):
+                    state["model_pulled_by_us"].setdefault("lmstudio", []).append(alias)
                     save_state(state)
+                elif rc == 0:
+                    warn(f"`lms get {alias}` returned rc=0 but model not detected on disk — load it manually in LM Studio.")
                 else:
-                    warn(f"`lms get {m['lmstudio']}` failed (rc={rc}) — load it manually in LM Studio.")
-                    if r.stderr.strip():
-                        warn(r.stderr.strip()[:300])
+                    warn(f"`lms get {alias}` failed (rc={rc}) — load it manually in LM Studio.")
+                    if last_stderr.strip():
+                        warn(last_stderr.strip()[:500])
+
+        # Resolve each lmstudio entry's HF download path to LM Studio's API
+        # alias (e.g. "lmstudio-community/Qwen3-Coder-Next-MLX-4bit" →
+        # "qwen3-coder-next-mlx") while the server is still up. Stored in a
+        # separate field so the original HF path stays usable for the on-disk
+        # detection check.
+        for m in models:
+            if "lmstudio" in m and have_lmstudio_model(m["lmstudio"]):
+                api_id = _lmstudio_resolve_api_id(m["lmstudio"])
+                if api_id:
+                    if api_id != m["lmstudio"]:
+                        log(f"LM Studio API ID for {m['lmstudio']} → {api_id}")
+                    m["lmstudio_api_id"] = api_id
+
         LMStudio.stop()
         time.sleep(2)
 
     # Configure opencode with all model aliases per backend.
+    # For LM Studio, prefer the resolved API ID (set during the download phase
+    # above) because pi/opencode will send that as the OpenAI `model` field.
     _ollama_models = [m["ollama"] for m in models if "ollama" in m] if "ollama" in requested_backends else []
-    _lmstudio_models = [m["lmstudio"] for m in models if "lmstudio" in m] if "lmstudio" in requested_backends else []
+    _lmstudio_models = [m.get("lmstudio_api_id") or m["lmstudio"] for m in models if "lmstudio" in m] if "lmstudio" in requested_backends else []
     _omlx_models = [m["omlx"] for m in models if "omlx" in m] if "omlx" in requested_backends else []
 
     if "pi" in requested_agents:
@@ -1680,7 +1946,23 @@ def main():
                 if backend not in m:
                     warn(f"Skipping {agent}+{backend}+{m['id']} — no '{backend}' alias for model.")
                     continue
-                model_alias = m[backend]
+                # For LM Studio, the HF download path differs from the API alias.
+                # Detect with the HF path, but invoke agents with the API alias.
+                detect_alias = m[backend]
+                runtime_alias = (
+                    m.get("lmstudio_api_id") or m[backend]
+                    if backend == "lmstudio" else m[backend]
+                )
+                model_present = (
+                    have_ollama_model(detect_alias)   if backend == "ollama"   else
+                    have_lmstudio_model(detect_alias) if backend == "lmstudio" else
+                    have_omlx_model(detect_alias)     if backend == "omlx"     else
+                    False
+                )
+                if not model_present:
+                    warn(f"Skipping {agent}+{backend}+{m['id']} — model '{detect_alias}' not present on {backend} (download likely failed).")
+                    continue
+                model_alias = runtime_alias
                 label = f"{agent}+{backend}+{m['id']}"
                 is_direct = AGENTS[agent].get("direct", False)
                 if is_direct:
@@ -1787,7 +2069,8 @@ def main():
     restore_pi_models_config()
     restore_opencode_config()
     restore_opencode_notools_agent()
-    log("Restored agent configs (pi models, opencode notools/config).")
+    LMStudio.restore_guardrails()
+    log("Restored agent configs (pi models, opencode notools/config, LM Studio guardrails).")
 
     print()
     if sys.stdin.isatty():
