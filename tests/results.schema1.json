@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "timestamp": "2025-01-15T12:00:00",
+  "platform": "macOS-15.0-arm64",
+  "cpu": "Apple M2",
+  "machine": "arm64",
+  "config": {
+    "models": [
+      { "id": "qwen3-1.7b", "ollama": "qwen3:1.7b" }
+    ],
+    "agents": ["pi"],
+    "backends": ["ollama"],
+    "iterations": 3,
+    "warmup": 1,
+    "prompt": "Output a single complete HTML file with two buttons."
+  },
+  "pre_existing": {
+    "ollama": true,
+    "fzf": true
+  },
+  "combos": [
+    {
+      "label": "pi+ollama+qwen3-1.7b",
+      "agent": "pi",
+      "backend": "ollama",
+      "model_id": "qwen3-1.7b",
+      "iterations": [
+        {
+          "iter": 0,
+          "wall_s": 4.12,
+          "ttft_s": 0.35,
+          "throughput_tok_per_s_est": 12.5,
+          "streamed": true,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>Click</button></body></html>"
+        },
+        {
+          "iter": 1,
+          "wall_s": 3.98,
+          "ttft_s": 0.31,
+          "throughput_tok_per_s_est": 13.1,
+          "streamed": true,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>Button</button></body></html>"
+        },
+        {
+          "iter": 2,
+          "wall_s": 4.05,
+          "ttft_s": 0.33,
+          "throughput_tok_per_s_est": 12.8,
+          "streamed": true,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>Press</button></body></html>"
+        }
+      ],
+      "summary": {
+        "wall_s_mean": 4.05,
+        "wall_s_median": 4.05,
+        "wall_s_stdev": 0.07,
+        "ttft_s_mean": 0.33,
+        "throughput_tok_per_s_mean_est": 12.8,
+        "streamed_all": true,
+        "all_runs_html": true,
+        "all_runs_have_buttons": true
+      }
+    }
+  ]
+}

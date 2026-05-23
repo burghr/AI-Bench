@@ -62,6 +62,16 @@
     font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase;
     white-space: nowrap;
   }
+  thead th[data-sort] {
+    cursor: pointer; user-select: none;
+    background-image: linear-gradient(transparent 60%, rgba(0,0,0,0.03));
+  }
+  thead th[data-sort]:hover { color: var(--acc); }
+  thead th[data-sort]:after {
+    content: ' ↕'; opacity: 0.25; font-size: 0.85em;
+  }
+  thead th[data-sort].sort-asc::after { content: ' ↑'; opacity: 0.9; }
+  thead th[data-sort].sort-desc::after { content: ' ↓'; opacity: 0.9; }
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover td { background: #f8fafc; }
   th[title] { cursor: help; }
@@ -159,6 +169,7 @@
 <div id="err" class="err"></div>
 <main id="report" class="hidden"></main>
 
+<script id="embedded-results-json" type="application/json"></script>
 <script>
 const FIELD_DOCS = {
   agent:   "The CLI/agent under test (e.g. pi, opencode). Each agent has its own startup cost, system prompt, and tool-call overhead — that's what we're trying to measure.",
@@ -192,6 +203,9 @@ const dz = $('#dz'), filein = $('#filein'), errEl = $('#err'), report = $('#repo
 const state = { sets: [], nextId: 1 };
 const PALETTE = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#9333ea', '#0891b2', '#65a30d', '#db2777'];
 
+// Sort state for summary table
+let currentSort = { key: null, dir: null }; // dir: 'asc' | 'desc'
+
 dz.addEventListener('click', () => filein.click());
 dz.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); filein.click(); } });
 filein.addEventListener('change', e => loadFiles(e.target.files));
@@ -204,16 +218,32 @@ dz.addEventListener('drop', e => {
   loadFiles(e.dataTransfer.files);
 });
 
+function addResultSet(data, filename = 'results.json') {
+  const id = state.nextId++;
+  const color = PALETTE[(id - 1) % PALETTE.length];
+  const label = labelFor(filename, data);
+  state.sets.push({ id, label, color, data, filename });
+}
+
+function loadEmbeddedResults() {
+  const el = document.getElementById('embedded-results-json');
+  const text = el ? el.textContent.trim() : '';
+  if (!text) return;
+  try {
+    addResultSet(JSON.parse(text), 'results.json');
+    renderAll();
+  } catch (e) {
+    errEl.textContent = `Failed to load embedded results.json: ${e.message}`;
+  }
+}
+
 async function loadFiles(fileList) {
   errEl.textContent = '';
   for (const file of Array.from(fileList || [])) {
     try {
       const text = await file.text();
       const data = JSON.parse(text);
-      const id = state.nextId++;
-      const color = PALETTE[(id - 1) % PALETTE.length];
-      const label = labelFor(file.name, data);
-      state.sets.push({ id, label, color, data, filename: file.name });
+      addResultSet(data, file.name);
     } catch (e) {
       errEl.textContent += (errEl.textContent ? '\n' : '') + `Failed to parse ${file.name}: ${e.message}`;
     }
@@ -266,10 +296,24 @@ function num(v, dp = 2) {
   if (!isFinite(n)) return esc(v);
   return n.toFixed(dp);
 }
+// Sortable summary columns: key -> { dir: 'min'|'max', accessor: s => value }
+const SORTABLE_COLS = {
+  wall_median:  { dir: 'min', accessor: s => s.wall_s_median },
+  wall_mean:    { dir: 'min', accessor: s => s.wall_s_mean },
+  wall_stdev:   { dir: 'min', accessor: s => s.wall_s_stdev },
+  ttft_mean:    { dir: 'min', accessor: s => s.ttft_s_mean },
+  throughput:   { dir: 'max', accessor: s => s.throughput_tok_per_s_mean_est },
+};
+
 function th(label, key, opts={}) {
   const cls = opts.num ? 'num' : '';
   const title = FIELD_DOCS[key] ? ` title="${esc(FIELD_DOCS[key])}"` : '';
-  return `<th class="${cls}"${title}>${esc(label)}</th>`;
+  const sortable = SORTABLE_COLS[key] ? ` data-sort="${key}"` : '';
+  let sortClass = '';
+  if (SORTABLE_COLS[key] && currentSort.key === key && currentSort.dir) {
+    sortClass = ` sort-${currentSort.dir}`;
+  }
+  return `<th class="${cls}${sortClass}"${title}${sortable}>${esc(label)}</th>`;
 }
 
 // Find best index. dir: 'min' or 'max'. Ignores null/undefined/NaN.
@@ -367,6 +411,16 @@ function renderCompare(sets) {
 
   // Sort combos for consistent display
   const sortedCombos = Array.from(comboMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+  if (currentSort.key && SORTABLE_COLS[currentSort.key]) {
+    const accessor = SORTABLE_COLS[currentSort.key].accessor;
+    const asc = currentSort.dir === 'asc';
+    sortedCombos.sort((a, b) => {
+      const va = accessor((a.rows[0] || {}).summary || {});
+      const vb = accessor((b.rows[0] || {}).summary || {});
+      if (va == null || vb == null) return 0;
+      return asc ? Number(va) - Number(vb) : Number(vb) - Number(va);
+    });
+  }
   for (const c of sortedCombos) {
     const cols = {
       med:   c.rows.map(r => r.summary.wall_s_median),
@@ -506,6 +560,19 @@ function renderCompare(sets) {
   }
 
   report.innerHTML = html;
+  report.querySelectorAll('thead th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.getAttribute('data-sort');
+      if (currentSort.key === key) {
+        if (currentSort.dir === 'asc') currentSort.dir = 'desc';
+        else currentSort.dir = null;
+      } else {
+        currentSort.key = key;
+        currentSort.dir = 'asc';
+      }
+      renderCompare(state.sets);
+    });
+  });
 }
 
 function render(data) {
@@ -513,13 +580,37 @@ function render(data) {
   const combos = data.combos || [];
   const pre = data.pre_existing || {};
 
+  // Schema compat: handle both legacy model_ollama and current models[]
+  let models = cfg.models || [];
+  if (!models.length && cfg.model_ollama) {
+    models = [{ id: cfg.model_ollama, ollama: cfg.model_ollama }];
+  }
+  const modelsStr = models.length
+    ? `Model(s): ${models.map(m => `<code>${esc(m.id || m.ollama || m.lmstudio || m.omlx || '')}</code>`).join(', ')}`
+    : '';
+
   let html = '';
   html += `<div class="meta"><strong>${esc(data.timestamp)}</strong> · ${esc(data.platform)}<br>
-    Model (Ollama): <code>${esc(cfg.model_ollama)}</code> · iterations: ${esc(cfg.iterations)} (warmup ${esc(cfg.warmup)})</div>`;
+            ${modelsStr ? modelsStr + ' · ' : ''}iterations: ${cfg.iterations || '?'} (warmup ${cfg.warmup || '?'})</div>`;
 
   // ---- Summary ----
   // Build per-column arrays so we can rank winners.
   const summaries = combos.map(c => c.summary || {});
+
+  // Sorting: compute permutation of indices based on currentSort
+  let sortedIdx = combos.map((_, i) => i);
+  if (currentSort.key && SORTABLE_COLS[currentSort.key]) {
+    const accessor = SORTABLE_COLS[currentSort.key].accessor;
+    const asc = currentSort.dir === 'asc';
+    sortedIdx.sort((a, b) => {
+      const va = accessor(summaries[a]);
+      const vb = accessor(summaries[b]);
+      if (va == null || vb == null) return 0;
+      if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+      return asc ? (va - vb) : (vb - va);
+    });
+  }
+
   const cols = {
     wall_med:   summaries.map(s => s.wall_s_median),
     wall_mean:  summaries.map(s => s.wall_s_mean),
@@ -551,7 +642,8 @@ function render(data) {
   html += th('valid HTML',      'html');
   html += th('buttons',         'buttons');
   html += '</tr></thead><tbody>';
-  combos.forEach((c, i) => {
+  sortedIdx.forEach(i => {
+    const c = combos[i];
     const s = c.summary || {};
     // Fall back to splitting label if structured fields missing (legacy results).
     const parts = (c.label || '').split('+');
@@ -579,7 +671,8 @@ function render(data) {
 
   // ---- Per-iteration ----
   html += '<h2>Per-iteration detail</h2>';
-  for (const c of combos) {
+  sortedIdx.forEach(i => {
+    const c = combos[i];
     const its = c.iterations || [];
     const ic = {
       wall:   its.map(i => i.wall_s),
@@ -617,14 +710,34 @@ function render(data) {
       html += '</tr>';
     });
     html += '</tbody></table></div></section>';
-  }
+  });
 
   html += `<h2>Prompt</h2><pre>${esc(cfg.prompt || '')}</pre>`;
   html += `<h2>Pre-flight inventory</h2><pre>${esc(JSON.stringify(pre, null, 2))}</pre>`;
 
   report.innerHTML = html;
   report.classList.remove('hidden');
+
+  // Wire sortable headers on the summary table
+  report.querySelectorAll('thead th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.getAttribute('data-sort');
+      if (currentSort.key === key) {
+        // Cycle: asc -> desc -> null (off)
+        if (currentSort.dir === 'asc') currentSort.dir = 'desc';
+        else currentSort.dir = null;
+      } else {
+        currentSort.key = key;
+        currentSort.dir = 'asc';
+      }
+      // Re-render with current sort state
+      const set = state.sets[0];
+      if (set) render(set.data);
+    });
+  });
 }
+
+loadEmbeddedResults();
 </script>
 </body>
 </html>

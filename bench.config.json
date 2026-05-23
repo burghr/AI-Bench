@@ -1,18 +1,20 @@
 {
   "models": [
     {
-      "id": "qwen3-1.7b",
-      "ollama": "qwen3:1.7b"
+      "id": "qwen3.6-27b",
+      "ollama": "qwen3.6:27b-mlx",
+      "lmstudio": "qwen3.6-27b"
     },
     {
-      "id": "qwen3-coder-next",
-      "lmstudio": "lmstudio-community/Qwen3-Coder-Next-MLX-4bit",
-      "omlx": "Qwen3-Coder-Next-MLX-4bit",
-      "omlx_hf": "lmstudio-community/Qwen3-Coder-Next-MLX-4bit"
+      "id": "qwen3.6-27b-6bit",
+      "omlx": "Qwen3.6-27B-6bit",
+      "omlx_hf": "mlx-community/Qwen3.6-27B-6bit"
     }
   ],
   "agents": [
-    "pi"
+    "pi",
+    "opencode",
+    "direct"
   ],
   "backends": [
     "ollama",

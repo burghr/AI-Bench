@@ -1,0 +1,97 @@
+{
+  "timestamp": "2025-01-10T09:00:00",
+  "platform": "macOS-14.0-arm64",
+  "cpu": "Apple M2 Pro",
+  "machine": "arm64",
+  "config": {
+    "model_ollama": "qwen2.5:3b",
+    "agents": ["pi", "cli1"],
+    "backends": ["ollama"],
+    "iterations": 2,
+    "warmup": 1,
+    "prompt": "Output a single complete HTML file with two buttons."
+  },
+  "pre_existing": {
+    "ollama": true,
+    "fzf": true
+  },
+  "combos": [
+    {
+      "label": "pi+ollama+qwen2.5:3b",
+      "agent": "pi",
+      "backend": "ollama",
+      "model_id": "qwen2.5:3b",
+      "iterations": [
+        {
+          "iter": 0,
+          "wall_s": 5.21,
+          "ttft_s": 0.42,
+          "throughput_tok_per_s_est": 10.4,
+          "streamed": true,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>A</button><button>B</button></body></html>"
+        },
+        {
+          "iter": 1,
+          "wall_s": 5.05,
+          "ttft_s": 0.39,
+          "throughput_tok_per_s_est": 10.9,
+          "streamed": true,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>X</button><button>Y</button></body></html>"
+        }
+      ],
+      "summary": {
+        "wall_s_mean": 5.13,
+        "wall_s_median": 5.13,
+        "wall_s_stdev": 0.11,
+        "ttft_s_mean": 0.405,
+        "throughput_tok_per_s_mean_est": 10.65,
+        "streamed_all": true,
+        "all_runs_html": true,
+        "all_runs_have_buttons": true
+      }
+    },
+    {
+      "label": "cli1+ollama+qwen2.5:3b",
+      "agent": "cli1",
+      "backend": "ollama",
+      "model_id": "qwen2.5:3b",
+      "iterations": [
+        {
+          "iter": 0,
+          "wall_s": 6.50,
+          "ttft_s": 0.61,
+          "throughput_tok_per_s_est": 8.2,
+          "streamed": false,
+          "looks_like_html": true,
+          "has_button": false,
+          "stdout": "<html><body><p>No buttons</p></body></html>"
+        },
+        {
+          "iter": 1,
+          "wall_s": 6.30,
+          "ttft_s": 0.58,
+          "throughput_tok_per_s_est": 8.5,
+          "streamed": false,
+          "looks_like_html": true,
+          "has_button": true,
+          "stdout": "<html><body><button>OK</button></body></html>"
+        }
+      ],
+      "summary": {
+        "wall_s_mean": 6.40,
+        "wall_s_median": 6.40,
+        "wall_s_stdev": 0.14,
+        "ttft_s_mean": 0.595,
+        "throughput_tok_per_s_mean_est": 8.35,
+        "streamed_all": false,
+        "all_runs_html": true,
+        "all_runs_have_buttons": false
+      }
+    }
+  ],
+  "skipped": []
+}
