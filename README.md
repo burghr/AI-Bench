@@ -14,12 +14,12 @@ A standalone `viewer.html` reads any `results.json` and renders a sortable, colo
 
 For each iteration of each combination:
 
-- **wall time** — total elapsed seconds, launch to last byte of output.
-- **time-to-first-token** — seconds from launch to the first non-whitespace stdout byte.
-- **estimated output tokens** — `chars / 4` heuristic.
-- **throughput tok/s** — tokens ÷ wall time. End-to-end, includes all agent and model overhead.
-- **streamed?** — whether the agent emitted output incrementally or buffered it all to the end.
-- **valid HTML / has buttons** — quick task-completion checks (configurable via the prompt).
+- **wall time** - total elapsed seconds, launch to last byte of output.
+- **time-to-first-token** - seconds from launch to the first non-whitespace stdout byte.
+- **estimated output tokens** - `chars / 4` heuristic.
+- **throughput tok/s** - tokens ÷ wall time. End-to-end, includes all agent and model overhead.
+- **streamed?** - whether the agent emitted output incrementally or buffered it all to the end.
+- **valid HTML / has buttons** - quick task-completion checks (configurable via the prompt).
 
 When the `direct` agent is enabled, the bench also captures **precise backend stats** from Ollama's `/api/generate` response: real `eval_count`, `eval_duration`, `prompt_eval_count`, `prompt_eval_duration`. From these it computes the model's actual **eval tok/s** (raw generation rate) and **prompt tok/s** (input ingestion rate) with no agent overhead. The viewer surfaces these in a "Direct backend stats" section so you can see how much of an agent's wall time is overhead vs. raw model speed.
 
@@ -33,12 +33,12 @@ These must be present before running `bench.py`. The script does **not** install
 
 | Prerequisite | Why needed | Install |
 |---|---|---|
-| **macOS** (Apple Silicon for full matrix) | Linux supports Ollama only; LM Studio and oMLX require Apple Silicon | — |
+| **macOS** (Apple Silicon for full matrix) | Linux supports Ollama only; LM Studio and oMLX require Apple Silicon | - |
 | **Python 3.9+** | Runs `bench.py` | Ships with macOS; or `brew install python` |
 | **Homebrew** | Installs `ollama`, `lm-studio`, `fzf` | [brew.sh](https://brew.sh) |
 | **Node.js 18+ / npm** | Installs the `pi` coding agent | `brew install node` |
 | **git** | Clones the oMLX source repo | Ships with Xcode CLT; or `brew install git` |
-| **Internet access** | First-time agent/backend/model downloads | — |
+| **Internet access** | First-time agent/backend/model downloads | - |
 
 ## Cleanup
 
@@ -46,7 +46,7 @@ These must be present before running `bench.py`. The script does **not** install
 
 - Tools you installed manually (Ollama, LM Studio, oMLX, pi, opencode that were present before the run).
 - Models you pulled by hand (they won't appear in `.bench-state.json` so cleanup skips them).
-- Config files you wrote yourself — backups created by AI-Bench (`.bench-bak` suffix) are restored; your originals are untouched.
+- Config files you wrote yourself - backups created by AI-Bench (`.bench-bak` suffix) are restored; your originals are untouched.
 - The `~/.ollama`, `~/.lmstudio`, `~/.pi`, `~/.opencode` directories unless the script can prove it created them.
 
 Before performing destructive cleanup the script prints a summary of what will be removed and asks for confirmation in interactive mode.
@@ -74,7 +74,7 @@ Cleanup restores these user config files unconditionally at end-of-run (even wit
 
 ### `--skip-install`
 
-Use `--skip-install` when everything is already present and you just want to run the benchmark. The script still performs pre-flight checks (detecting installed tools and available models) — it only skips the install step. If a required tool is missing after skipping install, the relevant combinations are skipped with a warning.
+Use `--skip-install` when everything is already present and you just want to run the benchmark. The script still performs pre-flight checks (detecting installed tools and available models). It only skips the install step. If a required tool is missing after skipping install, the relevant combinations are skipped with a warning.
 
 ## Quick start
 
@@ -118,19 +118,19 @@ python3 bench.py --cleanup-only
 
 ## Interactive model picker
 
-When running interactively without a pinned `--config`, the script opens a **per-backend model picker** before starting the benchmark. It requires no prior config knowledge — just search and select.
+When running interactively without a pinned `--config`, the script opens a **per-backend model picker** before starting the benchmark. It requires no prior config knowledge. Just search and select.
 
 ### Flow
 
 1. **fzf is installed first** (if not already present) so the picker is always available.
-2. For each backend — Ollama, LM Studio, oMLX — the picker shows:
+2. For each backend (Ollama, LM Studio, oMLX), the picker shows:
    - **Locally installed models** with sizes. Space to multi-select, Enter to confirm.
    - If nothing is selected, falls through to an **online search** (blank to skip the backend entirely).
 3. After all backends, you choose which **agents** to benchmark from a multi-select list with descriptions.
 4. You set **iterations** and **warmup** count.
 5. The resulting config is saved to `bench.config.json` and shown as a summary before the run starts.
 
-On the next run, the picker offers to **reuse the last config** — press Enter to skip straight to running with no network access needed.
+On the next run, the picker offers to **reuse the last config**. Press Enter to skip straight to running with no network access needed.
 
 ### Online search sources
 
@@ -148,7 +148,7 @@ Sizes for HuggingFace results are fetched in parallel (8 concurrent requests) so
 |---|---|
 | `pi` | Lightweight agentic CLI; fast, minimal overhead |
 | `opencode` | Full coding agent with file read/edit/shell tools; higher overhead |
-| `direct` | Raw HTTP to the backend API; no agent wrapper — measures pure model speed (Ollama only) |
+| `direct` | Raw HTTP to the backend API; no agent wrapper - measures pure model speed (Ollama only) |
 
 ## Configuration
 
@@ -179,13 +179,13 @@ The picker saves to `bench.config.json`. You can also edit it directly:
 |---|---|
 | `models` | List of models to test. Each entry has a human-readable `id` and per-backend aliases. A model is silently skipped for any backend it has no alias for. Models with the **same `id`** across backends are treated as the same model in the viewer (cross-backend comparison). |
 | `models[].ollama` | Tag passed to `ollama run` / `ollama pull`, e.g. `qwen3:1.7b`. |
-| `models[].lmstudio` | HuggingFace repo ID passed to `lms get`, e.g. `lmstudio-community/Qwen3-1.7B-GGUF`. Also used as the API model ID — run `curl -s http://127.0.0.1:1234/v1/models` to see exact IDs if the API rejects it. |
+| `models[].lmstudio` | HuggingFace repo ID passed to `lms get`, e.g. `lmstudio-community/Qwen3-1.7B-GGUF`. Also used as the API model ID - run `curl -s http://127.0.0.1:1234/v1/models` to see exact IDs if the API rejects it. |
 | `models[].omlx` | Directory name under `~/.omlx/models/`. |
 | `models[].omlx_hf` | HuggingFace repo used to download the oMLX model (defaults to `mlx-community/<omlx>`). |
 | `agents` | Agents to run. `pi`, `opencode`, `direct` are built-in. |
 | `backends` | Backends to use. `ollama`, `lmstudio`, `omlx`. |
 | `iterations` | Timed runs per combination. |
-| `warmup` | Untimed runs per combination executed first — hides cold model-load latency. |
+| `warmup` | Untimed runs per combination executed first - hides cold model-load latency. |
 | `timeout_s` | Maximum wall-clock seconds for one run. Defaults to `900`. |
 | `no_output_timeout_s` | Maximum seconds an agent subprocess may run without producing stdout before it is killed. Defaults to `min(360, timeout_s)`. |
 | `prompt` | Prompt sent to every run. Change this to benchmark different task types. |
@@ -220,7 +220,7 @@ Each run writes a copy of `viewer.html` into its results directory with that run
 - The exact prompt and pre-flight inventory for that run.
 - Tooltips on every column header explaining what the value means.
 
-The viewer is fully static — no server, no dependencies, just open the file. The root `viewer.html` also works as an empty comparison viewer if you want to load files manually. It works against any `results.json` from any run, current or historical. Sortable table headers are wired for the summary and comparison views. The viewer handles both the current schema (`schema_version: 1`) and legacy results files transparently, so historical results continue to render.
+The viewer is fully static. No server, no dependencies, just open the file. The root `viewer.html` also works as an empty comparison viewer if you want to load files manually. It works against any `results.json` from any run, current or historical. Sortable table headers are wired for the summary and comparison views. The viewer handles both the current schema (`schema_version: 1`) and legacy results files transparently, so historical results continue to render.
 
 ## Adding a new agent
 
@@ -237,7 +237,7 @@ AGENTS["myagent"] = {
     "supports_backends": ["ollama", "lmstudio"],
     "build_cmd": _myagent_cmd,
     "is_installed": lambda: bool(which("myagent")),
-    "desc": "myagent — one-line description shown in the picker",
+    "desc": "myagent - one-line description shown in the picker",
 }
 ```
 
@@ -246,7 +246,7 @@ Then add `"myagent"` to `agents` in the config (or pick it in the interactive pi
 ## Troubleshooting
 
 - **pi hangs forever on the first run, with low CPU usage.** Some pi extensions hold stdout open and prevent the process from exiting after `-p` mode finishes. Run `pi list` to see installed extensions, then `pi remove <name>` for any non-default ones, and re-run.
-- **`pi --list-models` shows no `ollama/...` entries.** Pi's ollama integration extension isn't installed yet. Run `ollama launch pi --model <any-model> --yes -- --list-models` once — it installs `@ollama/pi-coding-agent` and registers local models. Plain `pi --list-models` should show them afterwards.
+- **`pi --list-models` shows no `ollama/...` entries.** Pi's ollama integration extension isn't installed yet. Run `ollama launch pi --model <any-model> --yes -- --list-models` once. It installs `@ollama/pi-coding-agent` and registers local models. Plain `pi --list-models` should show them afterwards.
 - **LM Studio model not found / API rejects the model ID.** LM Studio's API model IDs don't always match the HuggingFace repo name. Run `curl -s http://127.0.0.1:1234/v1/models` to see exact IDs the running server accepts, then update `lmstudio` in `bench.config.json` to match.
 - **LM Studio first-time setup.** On a fresh machine the `lms` daemon may not be initialized. The script detects this and opens LM Studio.app once to finish setup, then quits it automatically.
 - **oMLX model not found.** The bench downloads oMLX models from HuggingFace using `omlx_hf`. If download fails, check that `HF_TOKEN` is set in `.env` or your shell, or verify the repo ID is correct. `curl -s http://localhost:8000/v1/models` shows what the running server has loaded.
@@ -257,11 +257,11 @@ Then add `"myagent"` to `agents` in the config (or pick it in the interactive pi
 
 ## Notes from real-world testing
 
-- **`pi -nt -p`** — pi must run with `-nt` (no tools) for benchmarking, otherwise it sometimes uses its `write` tool to save HTML to disk and outputs a status message instead of the code.
-- **`opencode --pure --agent notools`** — opencode's default `build` agent advertises file-editing tools; small/local models get confused and emit invalid tool calls. The bench writes a temporary `~/.config/opencode/agent/notools.md` that disables all tools, then restores the original at end of run.
-- **buffered vs streamed output** — pi's print mode buffers the entire response, so TTFT equals wall time for pi runs. The viewer surfaces this as `streamed: no` so you can interpret the ttft column accordingly.
+- **`pi -nt -p`** - pi must run with `-nt` (no tools) for benchmarking, otherwise it sometimes uses its `write` tool to save HTML to disk and outputs a status message instead of the code.
+- **`opencode --pure --agent notools`** - opencode's default `build` agent advertises file-editing tools; small/local models get confused and emit invalid tool calls. The bench writes a temporary `~/.config/opencode/agent/notools.md` that disables all tools, then restores the original at end of run.
+- **buffered vs streamed output** - pi's print mode buffers the entire response, so TTFT equals wall time for pi runs. The viewer surfaces this as `streamed: no` so you can interpret the ttft column accordingly.
 - **Token counts are estimates** (`chars / 4`). Relative comparisons within a model family are meaningful; absolute numbers are not authoritative.
-- **Backend ordering** — the script runs all combinations for one backend before starting the next, so backends are never running concurrently and don't compete for memory.
+- **Backend ordering** - the script runs all combinations for one backend before starting the next, so backends are never running concurrently and don't compete for memory.
 
 ## Development
 
